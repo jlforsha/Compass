@@ -1,4 +1,4 @@
-# Compass — specification (v11, 2026-10-27)
+# Compass — specification (v13, 2026-10-27)
 
 ## Purpose
 Mobile PWA that plans a driving route between a start and destination, scores the areas along it for vulnerability/safety, prefers routes that avoid areas above user-set thresholds, and hands the result to Google Maps (link with waypoints) and Google My Maps (KML overlay). Avoidance is a preference/best effort, not a guarantee.
@@ -8,6 +8,7 @@ Mobile PWA that plans a driving route between a start and destination, scores th
 - Area type: ZIP codes or Census tracts (US). Outside the US the app uses municipalities/admin-1 regardless.
 - Sliders 1–10 for Public Safety, Clean Environment, Overall VVI (default 6); saved in localStorage.
 - Route preferences: prefer state/federal highways near flagged areas (+ weight), count FM/RM as highways, avoid tolls / highways / ferries, max extra time for avoidance (default +90 min).
+- Avoid-highways safety warning: a static note "Not recommended in high-crime areas." always sits under the checkbox. When Avoid highways is checked AND the last result had flagged areas, high-scoring areas (any score ≥ 1.0), Mexico, or a country advisory Level 3+, a red pulsing box appears under the checkbox and a red banner tops the results: "⚠ High-crime area: staying on main/toll highways is usually safer. Avoiding highways can route you onto rural roads with higher risk." plus the reasons. Unchecking hides both. Pulse is CSS-only and disabled under prefers-reduced-motion.
 - Hard avoid: toggle, buffer 0–5 mi (default 1), openrouteservice API key field (stored only in this device's localStorage under `compass.orsKey`; never saved with other options, never in code).
 - Optional CSV upload (geoid,public_safety,clean_environment,overall) overrides scores.
 - Results: map with shaded areas, up to three routes, radio buttons choosing which route the Google link uses, Google Maps link (open/copy), KML download, log with numbers, notes, sources.
@@ -51,7 +52,7 @@ Dark red / red / orange = over threshold (sev ≥1.5 / ≥0.75 / >0). Yellow = u
 Photon `https://photon.komoot.io/api/?q=…&limit=6&lat=…&lon=…` (Nominatim policy forbids autocomplete). 300 ms debounce, min 3 chars, AbortController cancels stale requests, bias = GPS fix → start point (for destination) → map centre. Picking stores exact lat/lon (no re-geocoding); typing again clears it.
 
 ## Service worker
-`sw.js`: cache name `compass-vN`; precaches app shell + bundled JSON; network-first with `fetch(…,{cache:'no-store'})` for same-origin, cache fallback offline; cross-origin APIs untouched. **Bump the version on every deployed change** (currently `compass-v11`).
+`sw.js`: cache name `compass-vN`; precaches app shell + bundled JSON; network-first with `fetch(…,{cache:'no-store'})` for same-origin, cache fallback offline; cross-origin APIs untouched. **Bump the version on every deployed change** (currently `compass-v13`).
 
 ## Hosting
 GitHub Pages, repo `jlforsha/Compass`, branch `main`, site https://jlforsha.github.io/Compass/. Files are uploaded through GitHub's web upload page (no git/gh credentials on the build box). Netlify was abandoned (account suspended).

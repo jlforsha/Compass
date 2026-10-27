@@ -12,6 +12,11 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 <style>
+.hwarn{display:block;margin:6px 0 8px;padding:10px 12px;border-radius:10px;background:#7f1d1d;color:#fff;border:2px solid #ef4444;font-weight:600;animation:hpulse 1.6s ease-in-out infinite}
+.hbanner{margin:0 0 10px;padding:12px;border-radius:10px;background:#991b1b;color:#fff;border:2px solid #f87171;font-weight:700;animation:hpulse 1.6s ease-in-out infinite}
+@keyframes hpulse{0%,100%{box-shadow:0 0 0 0 #ef444400;opacity:1}50%{box-shadow:0 0 0 6px #ef444466;opacity:.85}}
+@media (prefers-reduced-motion:reduce){.hwarn,.hbanner{animation:none}}
+.hnote{display:block;color:#fca5a5;font-size:.85em;margin:-2px 0 6px 28px}
 .ac{position:relative}.acl{position:absolute;left:0;right:0;top:100%;z-index:2000;background:#1e293b;border:1px solid #334155;border-radius:10px;margin-top:2px;max-height:60vh;overflow:auto;box-shadow:0 8px 24px #0008}
 .acl div{padding:14px 12px;min-height:44px;border-bottom:1px solid #334155;cursor:pointer;line-height:1.25}.acl div:last-child{border-bottom:0}
 .acl div.on,.acl div:active{background:#334155}.acl b{display:block;color:#f1f5f9}.acl small{color:#94a3b8}
@@ -66,6 +71,8 @@ textarea{width:100%;font-size:13px;background:#0b1220;color:var(--fg);border-rad
   <label>Google-style route options</label>
   <label class="chk"><input type="checkbox" id="o_avoidTolls"> Avoid tolls</label>
   <label class="chk"><input type="checkbox" id="o_avoidHwy"> Avoid highways</label>
+  <small class="hnote">Not recommended in high-crime areas.</small>
+  <div class="hwarn" id="hwyWarn" role="alert" hidden></div>
   <label class="chk"><input type="checkbox" id="o_avoidFerry"> Avoid ferries</label>
   <label>Hard-avoid buffer (openrouteservice)</label>
   <label class="chk"><input type="checkbox" id="o_hardAvoid"> Hard avoid flagged areas</label>
@@ -84,6 +91,7 @@ textarea{width:100%;font-size:13px;background:#0b1220;color:var(--fg);border-rad
 <div class="note" style="margin:4px 0 10px">Map colours: <span style="color:#991b1b">■</span><span style="color:#ef4444">■</span><span style="color:#f97316">■</span> over your threshold (darker = further over) · <span style="color:#facc15">■</span> high but under your threshold · <span style="color:#86efac">■</span> low · <span style="color:#9ca3af">■</span> no data. Blue = avoidance route, purple = hard-avoid, black dashed = direct.</div>
 
 <div class="card" id="out" hidden>
+  <div class="hbanner" id="hwyBanner" role="alert" hidden></div>
   <label>Route for the link</label>
   <label class="chk"><input type="radio" name="pick" id="pickA"> <span id="pickAT">Avoidance route (blue)</span></label>
   <label class="chk" id="pickHL"><input type="radio" name="pick" id="pickH"> <span id="pickHT">Hard-avoid route (purple)</span></label>
@@ -452,7 +460,18 @@ const setMode=m=>{mode=m;$('mZip').classList.toggle('on',m==='zip');$('mTract').
 $('mZip').onclick=()=>setMode('zip');$('mTract').onclick=()=>setMode('tract');
 const savedO=JSON.parse(localStorage.getItem('compass.opts')||'null');if(savedO)Object.assign(OPTS,savedO);
 const OK=['hwyPref','fmIsHwy','avoidTolls','avoidHwy','avoidFerry','hardAvoid'];
-const syncO=()=>{for(const k of OK)OPTS[k]=$('o_'+k).checked;OPTS.hwyWeight=+$('o_hwyWeight').value;OPTS.maxExtraMin=+$('o_maxExtraMin').value;OPTS.bufferMi=+$('o_bufferMi').value;$('v_bufferMi').textContent=OPTS.bufferMi+' mi';OPTS.orsKey=$('orsKey').value.trim();
+const HWY_MSG='⚠ High-crime area: staying on main/toll highways is usually safer. Avoiding highways can route you onto rural roads with higher risk.';
+let lastRisk=null;
+function routeRisk(res){const why=[];const c=res.best||res.direct;const near=c.near||res.features||[];
+  if(near.some(f=>f.properties.flag))why.push('flagged areas on the route');
+  else if(near.some(f=>{const v=f.properties.vvi;return v&&DOMAINS.some(d=>v[d.k]!=null&&v[d.k]>=1.0);}))why.push('high-scoring areas on the route');
+  const isos=[...new Set(near.map(f=>f.properties.country).filter(Boolean))];
+  if(isos.includes('MX'))why.push('Mexico');
+  for(const iso of isos){const a=WORLD&&WORLD.countries[iso]&&WORLD.countries[iso].adv;if(a&&a.level>=3&&iso!=='MEX')why.push(`${WORLD.countries[iso].name} advisory Level ${a.level}`);}
+  return why;}
+function hwyWarn(){const on=$('o_avoidHwy').checked&&lastRisk&&lastRisk.length;const t=on?HWY_MSG+` (${lastRisk.join(', ')})`:'';
+  $('hwyWarn').hidden=!on;$('hwyWarn').textContent=t;$('hwyBanner').hidden=!on;$('hwyBanner').textContent=t;}
+const syncO=()=>{setTimeout(hwyWarn,0);for(const k of OK)OPTS[k]=$('o_'+k).checked;OPTS.hwyWeight=+$('o_hwyWeight').value;OPTS.maxExtraMin=+$('o_maxExtraMin').value;OPTS.bufferMi=+$('o_bufferMi').value;$('v_bufferMi').textContent=OPTS.bufferMi+' mi';OPTS.orsKey=$('orsKey').value.trim();
   $('orsNote').textContent=OPTS.hardAvoid?(OPTS.orsKey?'Hard avoid: routes with openrouteservice, blocking flagged areas + buffer (start/destination areas excepted). Public limit: 200 km² of blocked area, so the worst areas on your route are blocked first.':'No key set — hard avoid will fall back to OSRM soft avoidance. The key is free (openrouteservice.org/dev, 2,000 routes/day).'):'';$('v_maxExtraMin').textContent='+'+OPTS.maxExtraMin+' min';
   $('v_hwyWeight').textContent=OPTS.hwyWeight.toFixed(1)+'×'+(OPTS.hwyPref&&!OPTS.avoidHwy?'':' (off)');
   $('optWarn').textContent=OPTS.hwyPref&&OPTS.avoidHwy?'“Avoid highways” is on, so the highway preference is turned off and freeway km are penalized.':'';};
@@ -499,7 +518,7 @@ $('go').onclick=async()=>{
     const o=originPt||await geocode($('origin').value.trim()||(()=>{throw new Error('Enter a start or tap Use my location')})());
     if(!$('dest').value.trim())throw new Error('Enter a destination');
     const d=destPt||await geocode($('dest').value.trim());
-    syncO();const res=await plan(o,d,mode,th(),log,OPTS);lastRes=res;lastO=o;lastD=d;
+    syncO();const res=await plan(o,d,mode,th(),log,OPTS);lastRes=res;lastO=o;lastD=d;lastRisk=routeRisk(res);hwyWarn();
     layer.clearLayers();
     const T=th();
     // Colour = how bad the area is: grey no data; red/orange over your threshold; yellow high (score ≥ 1.0 = high by VVI convention, or within 0.5 of your threshold) but under it; green only when clearly low.
