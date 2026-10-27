@@ -78,6 +78,7 @@ textarea{width:100%;font-size:13px;background:#0b1220;color:var(--fg);border-rad
 
 <div class="card"><button class="pri" id="go">Calculate route</button><div id="status" class="note"></div></div>
 <div id="map"></div>
+<div class="note" style="margin:4px 0 10px">Map colours: <span style="color:#991b1b">■</span><span style="color:#ef4444">■</span><span style="color:#f97316">■</span> over your threshold (darker = further over) · <span style="color:#facc15">■</span> high but under your threshold · <span style="color:#86efac">■</span> low · <span style="color:#9ca3af">■</span> no data. Blue = avoidance route, purple = hard-avoid, black dashed = direct.</div>
 
 <div class="card" id="out" hidden>
   <label>Route for the link</label>
@@ -174,7 +175,7 @@ async function fetchAreas(line,mode,base=''){
   try{const w=await worldAreas(reg,base);for(const f of w.feats)if(!out.has(f.properties.GEOID))out.set(f.properties.GEOID,f);fetchAreas.notes=w.notes;}catch(e){fetchAreas.notes=['Worldwide data failed to load: '+e.message];}
   return [...out.values()];}
 function annotate(features,mode,th){
-  for(const f of features){const pp=f.properties;const v=pp.wsrc!==undefined?{public_safety:pp.wps,overall:null,clean_environment:null,nodata:pp.wps==null,gran:pp.gran,src:{public_safety:`${pp.wsrc} [${pp.gran}]`,overall:'unavailable outside US/Mexico',clean_environment:'unavailable outside US'}}:pp.country==='MX'?{public_safety:pp.ps,overall:pp.ov,clean_environment:null,nodata:pp.ps==null&&pp.ov==null,src:{public_safety:`SESNSP municipal incidence 2025 (${pp.hom??'?'} homicides/100k)`,overall:'CONEVAL Índice de Rezago Social 2020',clean_environment:'unavailable for Mexico'}}:lookupVVI(pp.GEOID,mode);f.properties.vvi=v;
+  for(const f of features){const pp=f.properties;const v=pp.wsrc!==undefined?{public_safety:pp.wps,overall:null,clean_environment:null,nodata:pp.wps==null,gran:pp.gran,src:{public_safety:`${pp.wsrc} [${pp.gran}]`,overall:'unavailable outside US/Mexico',clean_environment:'unavailable outside US'}}:pp.country==='MX'?{public_safety:mxPS(pp),overall:pp.ov,clean_environment:null,nodata:pp.ps==null&&pp.ov==null,src:{public_safety:`SESNSP municipal incidence 2025 (${pp.hom??'?'} homicides/100k; max of Mexico-relative score ${pp.ps} and world homicide scale)`,overall:'CONEVAL Índice de Rezago Social 2020',clean_environment:'unavailable for Mexico'}}:lookupVVI(pp.GEOID,mode);f.properties.vvi=v;
     f.properties.over=v.nodata?[]:DOMAINS.filter(d=>v[d.k]!=null&&v[d.k]>th[d.k]).map(d=>d.n);f.properties.sev=v.nodata?0:DOMAINS.reduce((a,d)=>a+(v[d.k]!=null&&v[d.k]>th[d.k]?v[d.k]-th[d.k]:0),0);f.properties.flag=f.properties.over.length>0;}
   return features;}
 /* ===== Data sources: local police data (US cities), Mexico (SESNSP/CONEVAL), VVI elsewhere in TX ===== */
@@ -198,6 +199,8 @@ let WORLD=null,WGEO=null;const gbCache={};
 async function loadWorld(base=''){if(!WORLD){WORLD=await (await fetch(base+'world/countries.json')).json();WGEO=await (await fetch(base+'world/countries_geo.json')).json();
   const ls=Object.values(WORLD.countries).filter(c=>c.hom&&c.hom[0]>0).map(c=>Math.log(c.hom[0]));const mu=ls.reduce((a,b)=>a+b)/ls.length;WORLD.mu=mu;WORLD.sd=Math.sqrt(ls.reduce((a,b)=>a+(b-mu)**2,0)/ls.length);
   for(const f of WGEO.features)f.bbox=turf.bbox(f);}return WORLD;}
+/** Mexico PS: within-Mexico z understates risk vs the US/world (Mexico ≈ 4× US homicide), so also put the municipal homicide rate on the same world scale used elsewhere; take the higher. */
+function mxPS(pp){if(pp.ps==null)return null;let v=pp.ps;if(WORLD&&pp.hom>0)v=Math.max(v,(Math.log(pp.hom)-WORLD.mu)/WORLD.sd);return Math.round(v*100)/100;}
 const ADV_SCORE={1:-0.5,2:0.5,3:1.5,4:3.0};
 async function gbADM1(iso){if(!gbCache[iso])gbCache[iso]=(async()=>{const m=await (await fetch(`https://www.geoboundaries.org/api/current/gbOpen/${iso}/ADM1/`)).json();
     const u=m.simplifiedGeometryGeoJSON.replace('https://github.com/wmgeolab/geoBoundaries/raw/','https://media.githubusercontent.com/media/wmgeolab/geoBoundaries/');
@@ -472,8 +475,12 @@ $('go').onclick=async()=>{
     const d=await geocode($('dest').value.trim());
     syncO();const res=await plan(o,d,mode,th(),log,OPTS);lastRes=res;lastO=o;lastD=d;
     layer.clearLayers();
-    const col=f=>{const p=f.properties;if(p.vvi.nodata)return '#9ca3af';if(!p.flag)return '#86efac';return p.sev>=1.5?'#991b1b':p.sev>=0.75?'#ef4444':'#f97316';};
-    L.geoJSON(turf.featureCollection(res.allFeatures),{style:f=>({color:col(f),weight:1,fillOpacity:f.properties.flag?0.45:0.25}),
+    const T=th();
+    // Colour = how bad the area is: grey no data; red/orange over your threshold; yellow high (score ≥ 1.0 = high by VVI convention, or within 0.5 of your threshold) but under it; green only when clearly low.
+    const col=f=>{const p=f.properties,v=p.vvi;const ds=DOMAINS.filter(d=>v[d.k]!=null);if(v.nodata||!ds.length)return '#9ca3af';
+      if(p.flag)return p.sev>=1.5?'#991b1b':p.sev>=0.75?'#ef4444':'#f97316';
+      const mx=Math.max(...ds.map(d=>v[d.k])),gap=Math.min(...ds.map(d=>T[d.k]-v[d.k]));return (mx>=1.0||gap<0.5)?'#facc15':'#86efac';};
+    L.geoJSON(turf.featureCollection(res.allFeatures),{style:f=>({color:col(f),fillColor:col(f),weight:1,fillOpacity:f.properties.flag?0.5:0.3}),
       onEachFeature:(f,l)=>{const v=f.properties.vvi;l.bindPopup(`<b>${esc(f.properties.NAME)}</b><br>`+DOMAINS.map(x=>`${x.n}: ${v[x.k]??'—'} <small>(${esc((v.src||{})[x.k]||'')})</small>`).join('<br>')+(v.nodata?'<br><i>No data source for this area</i>':'')+(f.properties.flag?`<br><b>Over:</b> ${f.properties.over.join(', ')} (by ${f.properties.sev.toFixed(2)})`:''));}}).addTo(layer);
     const D=res.direct,A=res.avoid,H=res.third;const fm=s=>Math.round(s/60),mi=m=>(m/1609.34).toFixed(1);
     const dl=L.geoJSON(D.line,{style:{color:'#1e293b',weight:5,dashArray:'8 6'}}).addTo(layer);
@@ -489,7 +496,7 @@ $('go').onclick=async()=>{
     $('pickDT').textContent=desc('Direct (black dashed)',D);
     $('pickHL').hidden=!H;if(H)$('pickHT').textContent=desc('Hard-avoid (purple)',H);
     $('pickA').disabled=A===D;
-    log(`\n— Result —\n${desc('Direct',D)}\n${A===D?'Avoidance: no alternative could be routed':desc('Avoidance',A)}`+(H?'\n'+desc('Hard-avoid',H):'')+`\nDefault: ${res.best===D?'Direct':res.best===A?'Avoidance':'Hard-avoid'} (lowest total exposure). "Worst areas" = flagged areas with severity ≥ ${isFinite(D.worstCut)?D.worstCut.toFixed(2):'—'} (top quarter on the direct route).`+(res.why?'\n'+res.why:'')+(res.notes.length?'\n'+res.notes.join('\n'):'')+'\nSources on this route: '+[...new Set(res.best.near.flatMap(f=>Object.values(f.properties.vvi.src||{})).map(x=>x.split(' — ')[0].replace(/ \(.*$/,'')))].join('; '));
+    log(`\n— Result —\nThresholds: `+DOMAINS.map(x=>`${x.n} ${T[x.k]>=0?'+':''}${T[x.k].toFixed(1)}`).join(', ')+`. Areas: ${res.allFeatures.length}, over threshold: ${res.allFeatures.filter(f=>f.properties.flag).length}, no data: ${res.allFeatures.filter(f=>f.properties.vvi.nodata).length}.\n${desc('Direct',D)}\n${A===D?'Avoidance: no alternative could be routed':desc('Avoidance',A)}`+(H?'\n'+desc('Hard-avoid',H):'')+`\nDefault: ${res.best===D?'Direct':res.best===A?'Avoidance':'Hard-avoid'} (lowest total exposure). "Worst areas" = flagged areas with severity ≥ ${isFinite(D.worstCut)?D.worstCut.toFixed(2):'—'} (top quarter on the direct route).`+(res.why?'\n'+res.why:'')+(res.notes.length?'\n'+res.notes.join('\n'):'')+'\nSources on this route: '+[...new Set(res.best.near.flatMap(f=>Object.values(f.properties.vvi.src||{})).map(x=>x.split(' — ')[0].replace(/ \(.*$/,'')))].join('; '));
     $(res.best===A&&A!==D?'pickA':res.best===H?'pickH':'pickD').checked=true;pick();
   }catch(e){log('⚠ '+e.message);}finally{$('go').disabled=false;}};
 const pick=()=>{if(!lastRes)return;const c=$('pickA').checked?lastRes.avoid:$('pickH').checked&&lastRes.third?lastRes.third:lastRes.direct;lastRes.best=c;lastRes.features=c.near;
