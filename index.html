@@ -131,7 +131,7 @@ function mockScore(geoid,dom){return Math.round((hash(geoid+'|'+dom)/4294967295*
 /** Single swap-in point for real data. */
 function lookupVVI(geoid,mode){
   if(realVVI&&realVVI[geoid])return {...realVVI[geoid],nodata:false,src:{public_safety:'your CSV',clean_environment:'your CSV',overall:'your CSV'}};
-  const v=VVI[mode]&&VVI[mode][geoid];const loc=LOCAL&&LOCAL[mode]&&LOCAL[mode][geoid];
+  const v=VVI[mode]&&VVI[mode][geoid];const loc=null;
   if(v||loc){const o={...(v||{public_safety:null,clean_environment:null,overall:null}),nodata:false,src:{public_safety:SRC.vvi,clean_environment:SRC.vvi,overall:SRC.vvi}};
     if(!v){o.src.clean_environment=o.src.overall=SRC.none;}
     if(loc){o.public_safety=loc.ps;o.src.public_safety=`${LOCAL.meta.sources[loc.city]} — ${loc.v} violent + ${loc.p} property incidents, ${LOCAL.meta.period}, pop ${loc.pop}`;}
@@ -162,21 +162,24 @@ async function fetchAreas(line,mode,base=''){
     const env=[w+(e-w)*i/nx,s+(n-s)*k/ny,w+(e-w)*(i+1)/nx,s+(n-s)*(k+1)/ny];
     const cell=turf.bboxPolygon(env);
     if(!turf.booleanIntersects(cell,reg))continue;
-    if(env[3]<25.8)continue; // entirely south of the US
+    if(env[3]<17||env[0]>-60||env[2]<-180)continue; // clearly outside the US/territories
+    if(WGEO&&!WGEO.features.some(c=>c.properties.iso==='USA'&&turf.booleanIntersects(c,cell)))continue;
     if(mx.length&&[[env[0],env[1]],[env[2],env[1]],[env[0],env[3]],[env[2],env[3]],[(env[0]+env[2])/2,(env[1]+env[3])/2]].every(inMX))continue;
     const p=new URLSearchParams({geometry:env.join(','),geometryType:'esriGeometryEnvelope',inSR:'4326',spatialRel:'esriSpatialRelIntersects',
       outFields:'GEOID,NAME',returnGeometry:'true',outSR:'4326',maxAllowableOffset:'0.0015',f:'geojson'});
     jobs.push(fetch(TIGER[mode]+'?'+p).then(r=>r.json()).then(j=>{for(const f of j.features||[]){f.properties.country='US';out.set(f.properties.GEOID,f);}}).catch(()=>{}));
   }
-  await Promise.all(jobs);return [...out.values()];}
+  await Promise.all(jobs);
+  try{const w=await worldAreas(reg,base);for(const f of w.feats)if(!out.has(f.properties.GEOID))out.set(f.properties.GEOID,f);fetchAreas.notes=w.notes;}catch(e){fetchAreas.notes=['Worldwide data failed to load: '+e.message];}
+  return [...out.values()];}
 function annotate(features,mode,th){
-  for(const f of features){const pp=f.properties;const v=pp.country==='MX'?{public_safety:pp.ps,overall:pp.ov,clean_environment:null,nodata:pp.ps==null&&pp.ov==null,src:{public_safety:`SESNSP municipal incidence 2025 (${pp.hom??'?'} homicides/100k)`,overall:'CONEVAL Índice de Rezago Social 2020',clean_environment:'unavailable for Mexico'}}:lookupVVI(pp.GEOID,mode);f.properties.vvi=v;
+  for(const f of features){const pp=f.properties;const v=pp.wsrc!==undefined?{public_safety:pp.wps,overall:null,clean_environment:null,nodata:pp.wps==null,gran:pp.gran,src:{public_safety:`${pp.wsrc} [${pp.gran}]`,overall:'unavailable outside US/Mexico',clean_environment:'unavailable outside US'}}:pp.country==='MX'?{public_safety:pp.ps,overall:pp.ov,clean_environment:null,nodata:pp.ps==null&&pp.ov==null,src:{public_safety:`SESNSP municipal incidence 2025 (${pp.hom??'?'} homicides/100k)`,overall:'CONEVAL Índice de Rezago Social 2020',clean_environment:'unavailable for Mexico'}}:lookupVVI(pp.GEOID,mode);f.properties.vvi=v;
     f.properties.over=v.nodata?[]:DOMAINS.filter(d=>v[d.k]!=null&&v[d.k]>th[d.k]).map(d=>d.n);f.properties.sev=v.nodata?0:DOMAINS.reduce((a,d)=>a+(v[d.k]!=null&&v[d.k]>th[d.k]?v[d.k]-th[d.k]:0),0);f.properties.flag=f.properties.over.length>0;}
   return features;}
 /* ===== Data sources: local police data (US cities), Mexico (SESNSP/CONEVAL), VVI elsewhere in TX ===== */
 let LOCAL=null,MXIDX=null;const mxCache={};
 const SRC={vvi:'Vizient VVI 2026',none:'no data source'};
-async function loadExtra(base=''){try{LOCAL=await (await fetch(base+'local_ps_tx.json')).json();}catch(e){LOCAL=null;}
+async function loadExtra(base=''){LOCAL=null; // US: VVI for every domain (local police data removed by request)
   try{MXIDX=await (await fetch(base+'mx/index.json')).json();}catch(e){MXIDX=null;}
   return {local:LOCAL?Object.keys(LOCAL.zip).length+Object.keys(LOCAL.tract).length:0,mx:MXIDX?MXIDX.states.length:0};}
 async function mxStates(bb,base=''){if(!MXIDX)return [];const out=[];
@@ -188,6 +191,29 @@ function uncoveredKm(line,features){let km=0;const c=line.geometry.coordinates;c
   for(let i=step;i<c.length;i+=step){const m=c[i];if(!features.some(f=>{const b=f.bbox;return m[0]>=b[0]&&m[0]<=b[2]&&m[1]>=b[1]&&m[1]<=b[3]&&turf.booleanPointInPolygon(m,f);}))km+=turf.distance(c[i-step],m);}
   return km;}
 const MX_ADVISORY='U.S. State Dept Mexico Travel Advisory: Level 2 – Exercise Increased Caution (updated 2026-05-28) due to terrorism, crime and kidnapping; some areas have increased risk. U.S. government employees may not travel between cities after dark, may not drive between Mexican border cities and the interior (limited exceptions), and should avoid traveling alone in remote areas. Check the restricted-areas maps at travel.state.gov before you go.';
+
+/* ===== Worldwide fallback: geoBoundaries ADM1 + UNODC homicide (country) + State Dept advisory (country / named regions) ===== */
+let WORLD=null,WGEO=null;const gbCache={};
+async function loadWorld(base=''){if(!WORLD){WORLD=await (await fetch(base+'world/countries.json')).json();WGEO=await (await fetch(base+'world/countries_geo.json')).json();
+  const ls=Object.values(WORLD.countries).filter(c=>c.hom&&c.hom[0]>0).map(c=>Math.log(c.hom[0]));const mu=ls.reduce((a,b)=>a+b)/ls.length;WORLD.mu=mu;WORLD.sd=Math.sqrt(ls.reduce((a,b)=>a+(b-mu)**2,0)/ls.length);
+  for(const f of WGEO.features)f.bbox=turf.bbox(f);}return WORLD;}
+const ADV_SCORE={1:-0.5,2:0.5,3:1.5,4:3.0};
+async function gbADM1(iso){if(!gbCache[iso])gbCache[iso]=(async()=>{const m=await (await fetch(`https://www.geoboundaries.org/api/current/gbOpen/${iso}/ADM1/`)).json();
+    const u=m.simplifiedGeometryGeoJSON.replace('https://github.com/wmgeolab/geoBoundaries/raw/','https://media.githubusercontent.com/media/wmgeolab/geoBoundaries/');
+    const g=await (await fetch(u)).json();return {feats:g.features,meta:m};})();return gbCache[iso];}
+function worldScore(iso,admName){const c=WORLD.countries[iso]||{};const a=c.adv;let ps=null,src=[],gran='country-level only';
+  if(c.hom&&c.hom[0]>0){ps=(Math.log(c.hom[0])-WORLD.mu)/WORLD.sd;src.push(`UNODC homicide ${c.hom[0]}/100k (${c.hom[1]})`);}
+  if(a){const s=ADV_SCORE[a.level];if(ps==null||s>ps)ps=s;src.push(`State Dept Level ${a.level} (${a.updated})`);
+    const nm=(admName||'').toLowerCase();for(const L of['4','3']){if(nm.length>3&&(a.regions[L]||[]).some(l=>l.toLowerCase().includes(nm))){ps=Math.max(ps,ADV_SCORE[L]);src.push(`region named in advisory as Level ${L}`);gran='region (State Dept named region)';break;}}}
+  return {ps:ps==null?null:Math.round(ps*100)/100,src:src.join(' + ')||'no data source',gran,adv:a};}
+async function worldAreas(reg,base=''){await loadWorld(base);const bb=turf.bbox(reg);const out=[],notes=[];
+  for(const c of WGEO.features){const iso=c.properties.iso;if(iso==='USA'||iso==='MEX')continue;const b=c.bbox;if(b[0]>bb[2]||b[2]<bb[0]||b[1]>bb[3]||b[3]<bb[1])continue;
+    if(!turf.booleanIntersects(c,reg))continue;
+    let fs=[];try{fs=(await gbADM1(iso)).feats;}catch(e){notes.push(`${c.properties.name}: geoBoundaries unavailable (${e.message}); using country outline.`);fs=[{type:'Feature',properties:{shapeName:c.properties.name},geometry:c.geometry}];}
+    for(const f of fs){f.bbox=f.bbox||turf.bbox(f);const q=f.bbox;if(q[0]>bb[2]||q[2]<bb[0]||q[1]>bb[3]||q[3]<bb[1])continue;if(!turf.booleanIntersects(f,reg))continue;
+      const w=worldScore(iso,f.properties.shapeName);
+      out.push({type:'Feature',bbox:f.bbox,geometry:f.geometry,properties:{GEOID:iso+':'+(f.properties.shapeID||f.properties.shapeName),NAME:`${f.properties.shapeName}, ${c.properties.name}`,country:iso,wps:w.ps,wsrc:w.src,gran:w.gran,adv:w.adv?w.adv.title:null}});}}
+  return {feats:out,notes};}
 
 /* ===== Hard-avoid buffer via openrouteservice ===== */
 const ORS_MAX_AREA_KM2=190, ORS_MAX_EXTENT_KM=19.5; // public API: 200 km² total, 20 km extent per polygon
@@ -217,7 +243,7 @@ function buildAvoid(line,features,origin,dest,bufMi,already=[]){
   if(dropped)notes.push(`ORS limits avoid areas to ${ORS_MAX_AREA_KM2+10} km² total; ${dropped} lower-priority piece(s) (${droppedA.toFixed(0)} km²) were left out.`);
   return {pieces:keep,area,notes};}
 function orsBody(origin,dest,pieces,opts){
-  const body={coordinates:[[origin.lon,origin.lat],[dest.lon,dest.lat]],instructions:true,preference:'recommended',units:'m',options:{}};
+  const body={coordinates:[[origin.lon,origin.lat],[dest.lon,dest.lat]],radiuses:[2000,2000],instructions:true,preference:'recommended',units:'m',options:{}};
   if(pieces.length)body.options.avoid_polygons={type:'MultiPolygon',coordinates:pieces.map(p=>p.q.geometry.coordinates.map(r=>r.map(c=>[+c[0].toFixed(5),+c[1].toFixed(5)])))};
   const af=[opts.avoidHwy&&'highways',opts.avoidTolls&&'tollways',opts.avoidFerry&&'ferries'].filter(Boolean);if(af.length)body.options.avoid_features=af;
   if(!Object.keys(body.options).length)delete body.options;return body;}
@@ -230,16 +256,34 @@ async function orsRoute(origin,dest,pieces,opts){
   return {geometry:{coordinates:c},distance:f.properties.summary.distance,duration:f.properties.summary.duration,legs:[{steps}],ors:true};}
 /** Waypoints sampled from a route so Google Maps follows it (Google dir URLs allow up to 9). */
 function sampleWps(line,n=9){const L=turf.length(line);const out=[];for(let i=1;i<=n;i++){const p=turf.along(line,L*i/(n+1)).geometry.coordinates;out.push({lon:p[0],lat:p[1]});}return out;}
-async function hardAvoid(origin,dest,direct,features,opts,log){
-  const bufMi=opts.bufferMi??1;let pieces=[],notes=new Set(),last=null,line=direct.line;
-  for(let it=0;it<4;it++){
-    const b=buildAvoid(line,features,origin,dest,bufMi,pieces);b.notes.forEach(n=>notes.add(n));
-    if(last&&b.pieces.length===pieces.length)break;pieces=b.pieces;
-    log(`Hard avoid pass ${it+1}: blocking ${pieces.length} piece(s), ${b.area.toFixed(0)} km² (buffer ${bufMi} mi)…`);
-    const r=await orsRoute(origin,dest,pieces,opts);last=r;line=turf.lineString(r.geometry.coordinates);
-    const e=exposure(line,features,r,opts);log(`  ORS route: ${(r.distance/1609.34).toFixed(1)} mi, ${Math.round(r.duration/60)} min, ${e.km.toFixed(1)} km flagged.`);
-    if(e.km<0.3)break;}
-  return {route:last,notes:[...notes],pieces};}
+async function hardAvoid(origin,dest,direct,features,opts,log,base){
+  // ORS limits: 200 km² of avoid area and ~150 km route length per request. So the trip is split into chunks
+  // whose break points sit outside flagged areas (taken from the best soft-avoid route), each with its own budget.
+  const bufMi=opts.bufferMi??1;const baseLine=(base||direct).line;const L=turf.length(baseLine);
+  const flagged=features.filter(f=>f.properties.flag);
+  const inFlag=p=>flagged.some(f=>{const b=f.bbox;return p[0]>=b[0]&&p[0]<=b[2]&&p[1]>=b[1]&&p[1]<=b[3]&&turf.booleanPointInPolygon(p,f);});
+  const n=Math.min(8,Math.max(Math.ceil(L/110),Math.ceil(L/18)));const brk=[[origin.lon,origin.lat]];
+  for(let i=1;i<n;i++){let best=null;for(let dk=0;dk<=Math.min(6,L/n/2)&&!best;dk+=0.5)for(const sg of[1,-1]){const at=L*i/n+sg*dk;if(at<=0.5||at>=L-0.5)continue;
+      const p=turf.along(baseLine,at).geometry.coordinates;if(!inFlag(p)){best=p;break;}}
+    brk.push(best||turf.along(baseLine,L*i/n).geometry.coordinates);}
+  brk.push([dest.lon,dest.lat]);
+  const P=c=>({lon:c[0],lat:c[1]});const coords=[],steps=[];let dist=0,dur=0,blocked=0,blockedA=0,unblocked=0,unblockedA=0;const notes=new Set();
+  log(`Hard avoid: ${n} chunk(s) along the ${base?'best soft-avoid':'direct'} route (ORS limits each request to 200 km² of blocks and ~150 km).`);
+  for(let i=0;i<brk.length-1;i++){
+    const a=P(brk[i]),b=P(brk[i+1]);const seg=turf.lineSliceAlong(baseLine,L*i/n,L*(i+1)/n);
+    let pieces=[],r=null,line=seg,bi;
+    for(let it=0;it<2;it++){bi=buildAvoid(line,features,a,b,bufMi,pieces);if(r&&bi.pieces.length===pieces.length)break;pieces=bi.pieces;
+      let use=pieces,got=null;
+      for(let k=0;k<4&&!got;k++){await sleep(1600);try{got=await orsRoute(a,b,use,opts);}catch(e){if(!/could not be found|routable point/i.test(e.message)||!use.length)throw e;
+          const keep=k<2?Math.floor(use.length/2):0;notes.add(`Chunk ${i+1}: no route with all blocks, retried with ${keep} block(s).`);use=use.slice(0,keep);}}
+      if(!got)throw new Error('no ORS route for chunk '+(i+1));r=got;if(use.length<pieces.length){pieces=use;bi.area=use.reduce((s,p)=>s+p.a,0);}line=turf.lineString(r.geometry.coordinates);if(use!==bi.pieces)break;}
+    bi.notes.filter(x=>/start or destination/.test(x)&&(i===0||i===brk.length-2)).forEach(x=>notes.add(x));
+    const left=(bi.notes.find(x=>/left out/.test(x))||'').match(/; (\d+) lower.*\((\d+) km/);
+    blocked+=pieces.length;blockedA+=bi.area;if(left){unblocked+=+left[1];unblockedA+=+left[2];}
+    const c=r.geometry.coordinates;coords.push(...(coords.length?c.slice(1):c));steps.push(...r.legs[0].steps);dist+=r.distance;dur+=r.duration;
+    log(`  chunk ${i+1}/${n}: ${pieces.length} block(s), ${bi.area.toFixed(0)} km², ${(r.distance/1609.34).toFixed(1)} mi`);}
+  notes.add(`Hard avoid blocked ${blocked} piece(s) (${blockedA.toFixed(0)} km²)`+(unblocked?`; ${unblocked} lower-priority piece(s) (${unblockedA.toFixed(0)} km²) could not be blocked within ORS limits.`:(blocked?'; every flagged area near the route was blocked.':'; nothing could be blocked (the flagged areas contain the start/destination, so they must be driven through).')));
+  return {route:{geometry:{coordinates:coords},distance:dist,duration:dur,legs:[{steps}],ors:true},notes:[...notes],stats:{blocked,blockedA,unblocked,unblockedA,chunks:n}};}
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let _lastOsrm=0;
@@ -290,7 +334,7 @@ async function plan(origin,dest,mode,th,log=()=>{},opts=OPTS){
   const simp=turf.simplify(lines[0],{tolerance:0.005});
   const corridor=longTrip?turf.buffer(simp,corrKm,{units:'kilometers'}):turf.buffer(axis,corrKm,{units:'kilometers'});
   const region=longTrip?corridor:turf.bboxPolygon(turf.bbox(turf.featureCollection([corridor,...lines])));
-  const features=annotate(await fetchAreas(region,mode,opts.base||''),mode,th);
+  await loadWorld(opts.base||'');const features=annotate(await fetchAreas(region,mode,opts.base||''),mode,th);
   for(const f of features)f.bbox=turf.bbox(f);
   const mk=(r,wps,label)=>{const l=turf.lineString(r.geometry.coordinates);return {line:l,route:r,wps,label,exp:exposure(l,features,r,opts)};};
   const cands=routes.map((r,i)=>mk(r,[],i?`OSRM alternative ${i}`:'Direct (fastest)'));
@@ -333,15 +377,18 @@ async function plan(origin,dest,mode,th,log=()=>{},opts=OPTS){
   let hard=null;const notes=[];
   if(opts.hardAvoid){
     if(!opts.orsKey)notes.push('Hard avoid is on but no openrouteservice API key is set — used OSRM soft avoidance instead. Get a free key at openrouteservice.org/dev and paste it in Settings.');
-    else try{const h=await hardAvoid(origin,dest,direct,features,opts,log);const c=mk(h.route,sampleWps(turf.lineString(h.route.geometry.coordinates)),`ORS hard-avoid (${opts.bufferMi??1} mi buffer)`);
-      c.gwps=true;tried.push(c);hard=c;notes.push(...h.notes);
+    else try{const h=await hardAvoid(origin,dest,direct,features,opts,log,best!==direct?best:null);const c=mk(h.route,sampleWps(turf.lineString(h.route.geometry.coordinates)),`ORS hard-avoid (${opts.bufferMi??1} mi buffer)`);
+      c.gwps=true;c.stats=h.stats;tried.push(c);hard=c;notes.push(...h.notes);
       if(totalScore(c,direct)<=totalScore(best,direct)||c.exp.km<best.exp.km)best=c;}
     catch(e){notes.push(`openrouteservice failed (${e.message}) — fell back to OSRM soft avoidance.`);}}
   const mxOn=features.some(f=>f.properties.country==='MX'&&turf.booleanIntersects(f,direct.line));
   if(mxOn)notes.push('⚠ '+MX_ADVISORY);
+  for(const n of fetchAreas.notes||[])notes.push(n);
+  const wc=[...new Set(features.filter(f=>f.properties.wsrc!==undefined&&turf.booleanIntersects(f,direct.line)).map(f=>f.properties.country))];
+  for(const iso of wc){const c=WORLD.countries[iso];notes.push(`⚠ ${c.name}: ${c.adv?c.adv.title+' ('+c.adv.updated+')':'no State Dept advisory matched'}. Public Safety here is ${features.some(f=>f.properties.country===iso&&/region/.test(f.properties.gran||''))?'partly region-level':'COUNTRY-LEVEL ONLY'} (UNODC homicide rate + advisory), so it cannot tell safe and unsafe neighborhoods apart; avoidance cannot help within this country.`);}
   const unc=uncoveredKm(direct.line,features);if(unc>2)notes.push(`${unc.toFixed(0)} km of the route has no data source (outside Texas VVI / local data / Mexico coverage) and is treated as unscored (grey), not safe.`);
   const avoid=best;const red=direct.exp.score>0?1-avoid.exp.score/direct.exp.score:0;
-  const chosen=(hard&&hard.exp.km<direct.exp.km-0.3)?hard:(avoid!==direct&&red>=0.2&&avoid.route.duration-direct.route.duration<=maxExtra)?avoid:direct;
+  const chosen=((avoid!==direct&&red>=0.2)&&avoid.route.duration-direct.route.duration<=maxExtra)?avoid:direct;
   let why='';
   if(avoid===direct||red<0.2)why=`No route found that cuts severity-weighted exposure by 20% or more within +${Math.round(maxExtra/60)} min (best: ${Math.round(red*100)}%). ${Math.round(100*features.filter(f=>f.properties.flag).length/Math.max(1,features.filter(f=>!f.properties.vvi.nodata).length))}% of areas in the ~${corrKm} km band are over your threshold.`;
   for(const c of[direct,avoid,hard].filter(Boolean))c.near=features.filter(f=>turf.booleanIntersects(f,c.line));
@@ -397,7 +444,7 @@ $('locBtn').onclick=()=>{if(!navigator.geolocation){st('Location not available �
 $('origin').oninput=()=>{originPt=null;};
 $('csv').onchange=async e=>{const f=e.target.files[0];if(!f)return;const m=parseCSV(await f.text());realVVI=m;
   $('dataBadge').textContent=`CSV loaded: ${Object.keys(m).length} rows override built-in Vizient data`;};
-loadVVI().then(async n=>{const x=await loadExtra();$('dataStatus').textContent=`✓ ${n.zip} ZIPs, ${n.tract} tracts; local police data for ${x.local} Dallas/Fort Worth/Austin areas; Mexico: ${x.mx} states of municipalities`;}).catch(e=>{$('dataStatus').textContent='⚠ failed to load VVI data: '+e.message;});
+loadVVI().then(async n=>{const x=await loadExtra();$('dataStatus').textContent=`✓ ${n.zip} ZIPs, ${n.tract} tracts; Mexico: ${x.mx} states of municipalities`;}).catch(e=>{$('dataStatus').textContent='⚠ failed to load VVI data: '+e.message;});
 const map=L.map('map').setView([32.0,-97.2],8);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);
 let layer=L.layerGroup().addTo(map);
