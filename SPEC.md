@@ -22,14 +22,14 @@ Mobile PWA that plans a driving route between a start and destination, scores th
 ## Data sources per region
 | Region | Public Safety | Clean Environment | Overall | Polygons |
 |---|---|---|---|---|
-| US | Vizient VVI 2026 public file (Texas ZIPs + tracts bundled) | VVI | VVI | Census TIGERweb (live) |
+| US | Vizient VVI 2026 public file (all 50 states + DC, ZIPs + tracts, per-state files) | VVI | VVI | Census TIGERweb (live) |
 | Mexico | max(SESNSP municipal incidence 2025 severity-weighted per 100k, z within Mexico; municipal homicide rate on the world homicide scale) | unavailable | CONEVAL Índice de Rezago Social 2020 | INEGI municipalities via CONABIO 2025 (figshare 31236322), simplified, `mx/mun_XX.json` per state |
 | Rest of world | max(UNODC national homicide rate z across countries [via World Bank VC.IHR.PSRC.P5]; State Dept advisory level score L1 −0.5, L2 0.5, L3 1.5, L4 3.0; regions named in Level 3/4 text) | unavailable | unavailable | geoBoundaries ADM1 (fetched at runtime) |
-- US = VVI only for every domain (Jeff's decision; local police data was built and then removed). VVI bundled data covers Texas; other US states show grey until data is added.
+- US = VVI only for every domain (Jeff's decision; local police data was built and then removed). VVI covers all 50 states + DC, split per state and lazy-loaded only for states the route touches.
 - Granularity is labelled per area ("country-level only", "region (State Dept named region)"). World data cannot distinguish neighbourhoods (e.g. Hillbrow, Maré, Marseille north are not singled out).
 - Mexico shows the State Dept Mexico advisory text (Level 2, 2026-05-28) as a warning; other countries show their advisory title/date.
 - No data → grey, never green. km of route with no coverage is reported.
-- Precomputed files: `vvi_tx_zip.json`, `vvi_tx_tract.json`, `mx/index.json` + `mx/mun_01..32.json`, `world/countries.json` (homicide + parsed advisories), `world/countries_geo.json` (Natural Earth 50m, simplified; used to pick countries along the route).
+- Precomputed files: `vvi/index.json` (ZIP3 → state FIPS, available states) + `vvi/zip_SS.json` / `vvi/tract_SS.json` (SS = state FIPS, same `{fields,data}` schema; ZIPs assigned to states via the Census 2020 ZCTA–county relationship file, non-ZCTA ZIPs by ZIP3; built by /workspace/vvi/build_states.py), `mx/index.json` + `mx/mun_01..32.json`, `world/countries.json` (homicide + parsed advisories), `world/countries_geo.json` (Natural Earth 50m, simplified; used to pick countries along the route).
 
 ## Map colour legend
 Dark red / red / orange = over threshold (sev ≥1.5 / ≥0.75 / >0). Yellow = under threshold but high (any score ≥ 1.0 or within 0.5 of threshold). Light green = clearly low. Grey = no data. Routes: black dashed = direct, blue = avoidance, purple = hard-avoid. Markers: green start, red end, yellow waypoints.
@@ -52,7 +52,7 @@ Dark red / red / orange = over threshold (sev ≥1.5 / ≥0.75 / >0). Yellow = u
 Photon `https://photon.komoot.io/api/?q=…&limit=6&lat=…&lon=…` (Nominatim policy forbids autocomplete). 300 ms debounce, min 3 chars, AbortController cancels stale requests, bias = GPS fix → start point (for destination) → map centre. Picking stores exact lat/lon (no re-geocoding); typing again clears it.
 
 ## Service worker
-`sw.js`: cache name `compass-vN`; precaches app shell + bundled JSON; network-first with `fetch(…,{cache:'no-store'})` for same-origin, cache fallback offline; cross-origin APIs untouched. **Bump the version on every deployed change** (currently `compass-v13`).
+`sw.js`: cache name `compass-vN`; precaches app shell + bundled JSON; network-first with `fetch(…,{cache:'no-store'})` for same-origin, cache fallback offline; cross-origin APIs untouched. **Bump the version on every deployed change** (currently `compass-v14`; per-state `vvi/*_SS.json` are not precached, only cached at runtime when a route loads them).
 
 ## Hosting
 GitHub Pages, repo `jlforsha/Compass`, branch `main`, site https://jlforsha.github.io/Compass/. Files are uploaded through GitHub's web upload page (no git/gh credentials on the build box). Netlify was abandoned (account suspended).
@@ -68,12 +68,13 @@ GitHub Pages, repo `jlforsha/Compass`, branch `main`, site https://jlforsha.gith
 ## Known limits
 - Avoidance is soft; OSRM ignores exclusions; Google may re-route between waypoints.
 - ORS public limits (200 km², 20 km extent, 150 km with avoid areas) mean dense flagged corridors (e.g. FW→Dallas at slider 4, ~1,400 km² flagged) can't be fully blocked; hard-avoid routes are often longer and sometimes worse.
-- Bundled VVI is Texas-only; VVI tract vintage differs from 2020 tracts (some tracts grey).
+- VVI tract vintage differs from 2020 tracts: split 2020 tracts (…01/…02) fall back to their 2010 parent (…00); other changed tracts stay grey.
+- "km with no data source" counts distance outside any polygon AND inside grey (unscored) polygons (fixed in v14; it previously ignored grey polygons).
 - World safety is country-level (plus named advisory regions); Mexico CE unavailable; world CE/Overall unavailable.
 - Public demo servers have fair-use limits; large calculations take 10–60 s.
 
 ## Open items
 - ACLED event density: API has no CORS → needs a scheduled GitHub Action (key as repo secret) or small proxy writing JSON into the repo.
 - Public sharing (e.g. on X): host from a neutral repo/account without Jeff's personal GitHub or data; no keys in code (verified).
-- More US coverage (VVI for other states), finer world sources (e.g. Rio ISP, SAPS station stats).
+- Finer world sources (e.g. Rio ISP, SAPS station stats).
 - Verify Google `avoid=` behaviour on Android.

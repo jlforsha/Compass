@@ -136,7 +136,16 @@ function routeViolations(route,opts=OPTS){const v=[];const segs=routeSegs(route,
 let realVVI=null; // CSV override: geoid -> {public_safety,...}
 const VVI={zip:null,tract:null};
 function setVVI(mode,j){const f=j.fields,m={};for(const[k,a]of Object.entries(j.data)){const o={};f.forEach((n,i)=>o[n]=a[i]);m[k]=o;}VVI[mode]=m;return Object.keys(m).length;}
-async function loadVVI(base=''){const n={};for(const mode of['zip','tract']){const r=await fetch(base+'vvi_tx_'+mode+'.json');n[mode]=setVVI(mode,await r.json());}return n;}
+/* Nationwide VVI is split per state (vvi/zip_SS.json, vvi/tract_SS.json, SS = state FIPS) and lazy-loaded for the states a route touches. */
+let VIDX=null;const vviLoaded={};
+function addVVI(mode,j){const f=j.fields,m=VVI[mode]||(VVI[mode]={});let n=0;for(const[k,a]of Object.entries(j.data)){const o={};f.forEach((x,i)=>o[x]=a[i]);m[k]=o;n++;}return n;}
+async function loadVVI(base=''){VIDX=await (await fetch(base+'vvi/index.json')).json();VVI.zip=VVI.zip||{};VVI.tract=VVI.tract||{};return {zipStates:VIDX.zipStates.length,tractStates:VIDX.tractStates.length};}
+/** state FIPS codes for US area GEOIDs: tract GEOID prefix, or ZIP3 -> states from the index */
+function vviStatesFor(geoids,mode){const s=new Set();for(const g of geoids){if(mode==='tract'){if(/^\d{11}$/.test(g))s.add(g.slice(0,2));}
+  else if(/^\d{5}$/.test(g)&&VIDX)for(const x of VIDX.zip3[g.slice(0,3)]||[])s.add(x);}return [...s];}
+async function ensureVVIStates(states,mode,base=''){if(!VIDX)await loadVVI(base);const have=mode==='zip'?VIDX.zipStates:VIDX.tractStates;
+  await Promise.all(states.filter(x=>have.includes(x)).map(x=>{const k=mode+'_'+x;if(!vviLoaded[k])vviLoaded[k]=fetch(base+'vvi/'+k+'.json').then(r=>{if(!r.ok)throw new Error(k+' HTTP '+r.status);return r.json();}).then(j=>addVVI(mode,j)).catch(e=>{delete vviLoaded[k];throw e;});return vviLoaded[k];}));
+  return states;}
 
 function hash(str){let h=2166136261>>>0;for(const c of str){h^=c.charCodeAt(0);h=Math.imul(h,16777619)>>>0;}
   h^=h>>>13;h=Math.imul(h,0x5bd1e995)>>>0;h^=h>>>15;return h>>>0;}
@@ -144,7 +153,8 @@ function mockScore(geoid,dom){return Math.round((hash(geoid+'|'+dom)/4294967295*
 /** Single swap-in point for real data. */
 function lookupVVI(geoid,mode){
   if(realVVI&&realVVI[geoid])return {...realVVI[geoid],nodata:false,src:{public_safety:'your CSV',clean_environment:'your CSV',overall:'your CSV'}};
-  const v=VVI[mode]&&VVI[mode][geoid];const loc=null;
+  let v=VVI[mode]&&VVI[mode][geoid];const loc=null;
+  if(!v&&mode==='tract'&&VVI.tract&&/^\d{11}$/.test(geoid))v=VVI.tract[geoid.slice(0,9)+'00']; // 2020 split tract -> its 2010 parent in the VVI file
   if(v||loc){const o={...(v||{public_safety:null,clean_environment:null,overall:null}),nodata:false,src:{public_safety:SRC.vvi,clean_environment:SRC.vvi,overall:SRC.vvi}};
     if(!v){o.src.clean_environment=o.src.overall=SRC.none;}
     if(loc){o.public_safety=loc.ps;o.src.public_safety=`${LOCAL.meta.sources[loc.city]} — ${loc.v} violent + ${loc.p} property incidents, ${LOCAL.meta.period}, pop ${loc.pop}`;}
@@ -183,7 +193,8 @@ async function fetchAreas(line,mode,base=''){
     jobs.push(fetch(TIGER[mode]+'?'+p).then(r=>r.json()).then(j=>{for(const f of j.features||[]){f.properties.country='US';out.set(f.properties.GEOID,f);}}).catch(()=>{}));
   }
   await Promise.all(jobs);
-  try{const w=await worldAreas(reg,base);for(const f of w.feats)if(!out.has(f.properties.GEOID))out.set(f.properties.GEOID,f);fetchAreas.notes=w.notes;}catch(e){fetchAreas.notes=['Worldwide data failed to load: '+e.message];}
+  try{await ensureVVIStates(vviStatesFor([...out.keys()],mode),mode,base);}catch(e){fetchAreas.vviErr='VVI state data failed to load: '+e.message;}
+  try{const w=await worldAreas(reg,base);for(const f of w.feats)if(!out.has(f.properties.GEOID))out.set(f.properties.GEOID,f);fetchAreas.notes=w.notes;if(fetchAreas.vviErr){w.notes.push(fetchAreas.vviErr);fetchAreas.vviErr=null;}}catch(e){fetchAreas.notes=['Worldwide data failed to load: '+e.message];}
   return [...out.values()];}
 function annotate(features,mode,th){
   for(const f of features){const pp=f.properties;const v=pp.wsrc!==undefined?{public_safety:pp.wps,overall:null,clean_environment:null,nodata:pp.wps==null,gran:pp.gran,src:{public_safety:`${pp.wsrc} [${pp.gran}]`,overall:'unavailable outside US/Mexico',clean_environment:'unavailable outside US'}}:pp.country==='MX'?{public_safety:mxPS(pp),overall:pp.ov,clean_environment:null,nodata:pp.ps==null&&pp.ov==null,src:{public_safety:`SESNSP municipal incidence 2025 (${pp.hom??'?'} homicides/100k; max of Mexico-relative score ${pp.ps} and world homicide scale)`,overall:'CONEVAL Índice de Rezago Social 2020',clean_environment:'unavailable for Mexico'}}:lookupVVI(pp.GEOID,mode);f.properties.vvi=v;
@@ -199,9 +210,10 @@ async function mxStates(bb,base=''){if(!MXIDX)return [];const out=[];
   for(const s of MXIDX.states){const b=s.bbox;if(b[0]>bb[2]||b[2]<bb[0]||b[1]>bb[3]||b[3]<bb[1])continue;
     if(!mxCache[s.ent])mxCache[s.ent]=fetch(base+'mx/mun_'+s.ent+'.json').then(r=>r.json());out.push(...(await mxCache[s.ent]).features);}
   return out;}
-/** km of a line not covered by any area polygon (= no data source there) */
+/** km of a line with no scored area under it: outside every polygon OR inside a polygon with no data (grey) */
 function uncoveredKm(line,features){let km=0;const c=line.geometry.coordinates;const step=Math.max(1,Math.floor(c.length/400));
-  for(let i=step;i<c.length;i+=step){const m=c[i];if(!features.some(f=>{const b=f.bbox;return m[0]>=b[0]&&m[0]<=b[2]&&m[1]>=b[1]&&m[1]<=b[3]&&turf.booleanPointInPolygon(m,f);}))km+=turf.distance(c[i-step],m);}
+  const F=features.filter(f=>!(f.properties.vvi&&f.properties.vvi.nodata));for(const f of F)f.bbox=f.bbox||turf.bbox(f);
+  for(let i=step;i<c.length;i+=step){const m=c[i];if(!F.some(f=>{const b=f.bbox;return m[0]>=b[0]&&m[0]<=b[2]&&m[1]>=b[1]&&m[1]<=b[3]&&turf.booleanPointInPolygon(m,f);}))km+=turf.distance(c[i-step],m);}
   return km;}
 const MX_ADVISORY='U.S. State Dept Mexico Travel Advisory: Level 2 – Exercise Increased Caution (updated 2026-05-28) due to terrorism, crime and kidnapping; some areas have increased risk. U.S. government employees may not travel between cities after dark, may not drive between Mexican border cities and the interior (limited exceptions), and should avoid traveling alone in remote areas. Check the restricted-areas maps at travel.state.gov before you go.';
 
@@ -401,7 +413,7 @@ async function plan(origin,dest,mode,th,log=()=>{},opts=OPTS){
   for(const n of fetchAreas.notes||[])notes.push(n);
   const wc=[...new Set(features.filter(f=>f.properties.wsrc!==undefined&&turf.booleanIntersects(f,direct.line)).map(f=>f.properties.country))];
   for(const iso of wc){const c=WORLD.countries[iso];notes.push(`⚠ ${c.name}: ${c.adv?c.adv.title+' ('+c.adv.updated+')':'no State Dept advisory matched'}. Public Safety here is ${features.some(f=>f.properties.country===iso&&/region/.test(f.properties.gran||''))?'partly region-level':'COUNTRY-LEVEL ONLY'} (UNODC homicide rate + advisory), so it cannot tell safe and unsafe neighborhoods apart; avoidance cannot help within this country.`);}
-  const unc=uncoveredKm(direct.line,features);if(unc>2)notes.push(`${unc.toFixed(0)} km of the route has no data source (outside Texas VVI / local data / Mexico coverage) and is treated as unscored (grey), not safe.`);
+  const unc=uncoveredKm(direct.line,features);if(unc>2)notes.push(`${unc.toFixed(0)} km of the route has no data source (no VVI / Mexico / world score there) and is treated as unscored (grey), not safe.`);
   // Always offer an avoidance route: the candidate keeping the most distance out of the WORST flagged areas.
   let pool=[...cands.slice(1),...tried].filter(c=>c&&c!==direct);
   if(!pool.length){for(const side of[1,-1]){const c=await tryWps([offsetPt(origin,dest,0.5,10,side)],`10 km ${sideName(origin,dest,side)} (best attempt)`);if(c)pool.push(c);}}
@@ -440,7 +452,7 @@ function toKML(res,mode,th){
   return `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Compass ${mode==='zip'?'ZIP':'Tract'} overlay</name>
 ${S('high','4444ef')}${S('flag','1673f9')}${S('ok','acef86')}${S('nodata','9ca3af')}<Style id="route"><LineStyle><color>fff8bd38</color><width>5</width></LineStyle></Style>
 <Folder><name>Areas</name>${pm}</Folder><Placemark><name>Route</name><styleUrl>#route</styleUrl><LineString><tessellate>1</tessellate><coordinates>${res.best.line.geometry.coordinates.map(c=>c[0]+','+c[1]).join(' ')}</coordinates></LineString></Placemark></Document></kml>`;}
-if(typeof module!=='undefined')module.exports={loadExtra,buildAvoid,orsBody,orsRoute,sampleWps,uncoveredKm,OPTS,classifyStep,routeSegs,routeViolations,setVVI,VVI,sliderToScore,lookupVVI,parseCSV,osrm,fetchAreas,annotate,exposure,plan,offsetPt,gmapsURL,toKML,DOMAINS,setReal:m=>realVVI=m};
+if(typeof module!=='undefined')module.exports={loadExtra,loadVVI,ensureVVIStates,vviStatesFor,buildAvoid,orsBody,orsRoute,sampleWps,uncoveredKm,OPTS,classifyStep,routeSegs,routeViolations,setVVI,VVI,sliderToScore,lookupVVI,parseCSV,osrm,fetchAreas,annotate,exposure,plan,offsetPt,gmapsURL,toKML,DOMAINS,setReal:m=>realVVI=m};
 </script>
 <script>
 /* ===== UI ===== */
@@ -509,7 +521,7 @@ function setupAC(id,isStart){const inp=$(id),list=$(id+'_l');let timer=null,ctl=
 setupAC('origin',true);setupAC('dest',false);
 $('csv').onchange=async e=>{const f=e.target.files[0];if(!f)return;const m=parseCSV(await f.text());realVVI=m;
   $('dataBadge').textContent=`CSV loaded: ${Object.keys(m).length} rows override built-in Vizient data`;};
-loadVVI().then(async n=>{const x=await loadExtra();$('dataStatus').textContent=`✓ ${n.zip} ZIPs, ${n.tract} tracts; Mexico: ${x.mx} states of municipalities`;}).catch(e=>{$('dataStatus').textContent='⚠ failed to load VVI data: '+e.message;});
+loadVVI().then(async n=>{const x=await loadExtra();$('dataStatus').textContent=`✓ VVI nationwide (${n.tractStates} states + DC, loaded per state along the route); Mexico: ${x.mx} states of municipalities`;}).catch(e=>{$('dataStatus').textContent='⚠ failed to load VVI data: '+e.message;});
 const map=L.map('map').setView([32.0,-97.2],8);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);
 let layer=L.layerGroup().addTo(map);
