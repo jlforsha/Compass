@@ -81,8 +81,9 @@ textarea{width:100%;font-size:13px;background:#0b1220;color:var(--fg);border-rad
 
 <div class="card" id="out" hidden>
   <label>Route for the link</label>
-  <label class="chk"><input type="radio" name="pick" id="pickA"> Avoidance route (blue)</label>
-  <label class="chk"><input type="radio" name="pick" id="pickD"> Direct route (black dashed)</label>
+  <label class="chk"><input type="radio" name="pick" id="pickA"> <span id="pickAT">Avoidance route (blue)</span></label>
+  <label class="chk" id="pickHL"><input type="radio" name="pick" id="pickH"> <span id="pickHT">Hard-avoid route (purple)</span></label>
+  <label class="chk"><input type="radio" name="pick" id="pickD"> <span id="pickDT">Direct route (black dashed)</span></label>
   <label>1. Navigate in Google Maps</label>
   <textarea id="gurl" rows="3" readonly></textarea>
   <div class="row"><a class="btn" id="openG" target="_blank" rel="noopener">Open in Google Maps</a><button id="copyG">Copy link</button></div>
@@ -387,12 +388,28 @@ async function plan(origin,dest,mode,th,log=()=>{},opts=OPTS){
   const wc=[...new Set(features.filter(f=>f.properties.wsrc!==undefined&&turf.booleanIntersects(f,direct.line)).map(f=>f.properties.country))];
   for(const iso of wc){const c=WORLD.countries[iso];notes.push(`⚠ ${c.name}: ${c.adv?c.adv.title+' ('+c.adv.updated+')':'no State Dept advisory matched'}. Public Safety here is ${features.some(f=>f.properties.country===iso&&/region/.test(f.properties.gran||''))?'partly region-level':'COUNTRY-LEVEL ONLY'} (UNODC homicide rate + advisory), so it cannot tell safe and unsafe neighborhoods apart; avoidance cannot help within this country.`);}
   const unc=uncoveredKm(direct.line,features);if(unc>2)notes.push(`${unc.toFixed(0)} km of the route has no data source (outside Texas VVI / local data / Mexico coverage) and is treated as unscored (grey), not safe.`);
-  const avoid=best;const red=direct.exp.score>0?1-avoid.exp.score/direct.exp.score:0;
-  const chosen=((avoid!==direct&&red>=0.2)&&avoid.route.duration-direct.route.duration<=maxExtra)?avoid:direct;
+  // Always offer an avoidance route: the candidate keeping the most distance out of the WORST flagged areas.
+  let pool=[...cands.slice(1),...tried].filter(c=>c&&c!==direct);
+  if(!pool.length){for(const side of[1,-1]){const c=await tryWps([offsetPt(origin,dest,0.5,10,side)],`10 km ${sideName(origin,dest,side)} (best attempt)`);if(c)pool.push(c);}}
+  const sevs=features.filter(f=>f.properties.flag&&turf.booleanIntersects(f,direct.line)).map(f=>f.properties.sev).sort((a,b)=>b-a);
+  const worstCut=sevs.length?sevs[Math.floor((sevs.length-1)*0.25)]:Infinity;
+  const worstF=features.filter(f=>f.properties.flag&&f.properties.sev>=worstCut);
+  const worstKm=c=>{if(c._wk!=null)return c._wk;let k=0;const co=c.line.geometry.coordinates;const lb=turf.bbox(c.line);const F=worstF.filter(f=>{const b=f.bbox;return !(b[0]>lb[2]||b[2]<lb[0]||b[1]>lb[3]||b[3]<lb[1]);});
+    for(let i=1;i<co.length;i++){const m=[(co[i][0]+co[i-1][0])/2,(co[i][1]+co[i-1][1])/2];if(F.some(f=>{const b=f.bbox;return m[0]>=b[0]&&m[0]<=b[2]&&m[1]>=b[1]&&m[1]<=b[3]&&turf.booleanPointInPolygon(m,f);}))k+=turf.distance(co[i-1],co[i]);}return c._wk=k;};
+  worstKm(direct);
+  pool.sort((a,b)=>worstKm(a)-worstKm(b)||a.exp.score-b.exp.score||a.route.duration-b.route.duration);
+  const avoid=pool[0]||direct;
+  const third=hard&&hard!==avoid?hard:null;
+  const red=direct.exp.score>0?1-avoid.exp.score/direct.exp.score:0;
+  // Default = lowest total exposure among the options (direct wins ties)
+  const opts3=[direct,avoid,third].filter(Boolean);
+  const chosen=opts3.reduce((a,c)=>c.exp.score<a.exp.score*0.98?c:a,direct);
+  for(const c of opts3){c.worstKm=worstKm(c);c.worstCut=worstCut;}
   let why='';
-  if(avoid===direct||red<0.2)why=`No route found that cuts severity-weighted exposure by 20% or more within +${Math.round(maxExtra/60)} min (best: ${Math.round(red*100)}%). ${Math.round(100*features.filter(f=>f.properties.flag).length/Math.max(1,features.filter(f=>!f.properties.vvi.nodata).length))}% of areas in the ~${corrKm} km band are over your threshold.`;
-  for(const c of[direct,avoid,hard].filter(Boolean))c.near=features.filter(f=>turf.booleanIntersects(f,c.line));
-  return {best:chosen,direct,avoid,hard,red,cands,tried,why,notes,features:chosen.near,allFeatures:features};}
+  if(avoid===direct)why='No alternative route could be found at all, so only the direct route is available.';
+  else if(red<0.2)why=`No option cuts total flagged exposure by 20% or more (avoidance route: ${Math.round(red*100)}%), so Direct stays the default. The avoidance route is still offered: it keeps the most distance out of the worst areas.`;
+  for(const c of[direct,avoid,hard,third].filter(Boolean))c.near=features.filter(f=>turf.booleanIntersects(f,c.line));
+  return {best:chosen,direct,avoid,hard,third,red,cands,tried,why,notes,features:chosen.near,allFeatures:features};}
 function gmapsURL(o,d,wps,opts=OPTS){
   const f=p=>p.lat.toFixed(6)+','+p.lon.toFixed(6);
   let u='https://www.google.com/maps/dir/?api=1&origin='+encodeURIComponent(f(o))+'&destination='+encodeURIComponent(f(d));
@@ -458,18 +475,26 @@ $('go').onclick=async()=>{
     const col=f=>{const p=f.properties;if(p.vvi.nodata)return '#9ca3af';if(!p.flag)return '#86efac';return p.sev>=1.5?'#991b1b':p.sev>=0.75?'#ef4444':'#f97316';};
     L.geoJSON(turf.featureCollection(res.allFeatures),{style:f=>({color:col(f),weight:1,fillOpacity:f.properties.flag?0.45:0.25}),
       onEachFeature:(f,l)=>{const v=f.properties.vvi;l.bindPopup(`<b>${esc(f.properties.NAME)}</b><br>`+DOMAINS.map(x=>`${x.n}: ${v[x.k]??'—'} <small>(${esc((v.src||{})[x.k]||'')})</small>`).join('<br>')+(v.nodata?'<br><i>No data source for this area</i>':'')+(f.properties.flag?`<br><b>Over:</b> ${f.properties.over.join(', ')} (by ${f.properties.sev.toFixed(2)})`:''));}}).addTo(layer);
-    const D=res.direct,A=res.best===res.direct?res.avoid:res.best;res.alt=A;const fm=s=>Math.round(s/60),mi=m=>(m/1609.34).toFixed(1);
+    const D=res.direct,A=res.avoid,H=res.third;const fm=s=>Math.round(s/60),mi=m=>(m/1609.34).toFixed(1);
     const dl=L.geoJSON(D.line,{style:{color:'#1e293b',weight:5,dashArray:'8 6'}}).addTo(layer);
+    const hl=H?L.geoJSON(H.line,{style:{color:'#9333ea',weight:5}}).addTo(layer):null;
     const al=A!==D?L.geoJSON(A.line,{style:{color:'#2563eb',weight:6}}).addTo(layer):dl;
-    [o,...A.wps,d].forEach((p,i,a)=>L.circleMarker([p.lat,p.lon],{radius:8,color:'#fff',fillColor:i===0?'#22c55e':i===a.length-1?'#ef4444':'#eab308',fillOpacity:1}).addTo(layer));
-    map.fitBounds(L.featureGroup([dl,al]).getBounds(),{padding:[20,20]});
-    const line=(n,c)=>`${n}: ${mi(c.route.distance)} mi, ${fm(c.route.duration)} min${c===D?'':` (+${Math.max(0,fm(c.route.duration-D.route.duration))})`}, ${c.exp.km.toFixed(1)} km flagged, severity-weighted exposure ${c.exp.wkm.toFixed(1)}, ${Math.round(c.exp.mwKm)} km freeway`;
-    log(`\n— Result —\n${line('Direct (black dashed)',D)}\n${A===D?'Avoidance: no better route found':line('Avoidance route (blue, '+A.label+')',A)+` — ${Math.round(res.red*100)}% less weighted exposure`}`+(res.why?'\n'+res.why:'')+(res.notes.length?'\n'+res.notes.join('\n'):'')+'\nSources on this route: '+[...new Set(res.best.near.flatMap(f=>Object.values(f.properties.vvi.src||{})).map(x=>x.split(' — ')[0].replace(/ \(.*$/,'')))].join('; '));
-    $('pickA').disabled=A===D;$(res.best===A&&A!==D?'pickA':'pickD').checked=true;pick();
+    [o,...(A.gwps?[]:A.wps),d].forEach((p,i,a)=>L.circleMarker([p.lat,p.lon],{radius:8,color:'#fff',fillColor:i===0?'#22c55e':i===a.length-1?'#ef4444':'#eab308',fillOpacity:1}).addTo(layer));
+    map.fitBounds(L.featureGroup([dl,al,hl].filter(Boolean)).getBounds(),{padding:[20,20]});
+    const pct=c=>D.exp.score>0?Math.round((c.exp.score/D.exp.score-1)*100):0;
+    const desc=(n,c)=>{if(c===D)return `${n}: ${mi(c.route.distance)} mi, ${fm(c.route.duration)} min, ${c.exp.km.toFixed(1)} km flagged (${c.worstKm.toFixed(1)} km in worst areas)`;
+      const dt=fm(c.route.duration-D.route.duration),saved=D.worstKm-c.worstKm,p=pct(c);
+      return `${n} (${c.label}): ${dt>=0?'+':''}${dt} min, ${saved>=0.1?`avoids ${saved.toFixed(1)} km of the worst areas`:saved<=-0.1?`${(-saved).toFixed(1)} km MORE in the worst areas`:'same km in the worst areas'}, total flagged exposure ${p>0?p+'% higher':p<0?(-p)+'% lower':'about the same'} (${c.exp.km.toFixed(1)} km flagged, ${mi(c.route.distance)} mi)`;};
+    $('pickAT').textContent=A===D?'Avoidance route: no alternative could be routed':desc('Avoidance route (blue)',A);
+    $('pickDT').textContent=desc('Direct (black dashed)',D);
+    $('pickHL').hidden=!H;if(H)$('pickHT').textContent=desc('Hard-avoid (purple)',H);
+    $('pickA').disabled=A===D;
+    log(`\n— Result —\n${desc('Direct',D)}\n${A===D?'Avoidance: no alternative could be routed':desc('Avoidance',A)}`+(H?'\n'+desc('Hard-avoid',H):'')+`\nDefault: ${res.best===D?'Direct':res.best===A?'Avoidance':'Hard-avoid'} (lowest total exposure). "Worst areas" = flagged areas with severity ≥ ${isFinite(D.worstCut)?D.worstCut.toFixed(2):'—'} (top quarter on the direct route).`+(res.why?'\n'+res.why:'')+(res.notes.length?'\n'+res.notes.join('\n'):'')+'\nSources on this route: '+[...new Set(res.best.near.flatMap(f=>Object.values(f.properties.vvi.src||{})).map(x=>x.split(' — ')[0].replace(/ \(.*$/,'')))].join('; '));
+    $(res.best===A&&A!==D?'pickA':res.best===H?'pickH':'pickD').checked=true;pick();
   }catch(e){log('⚠ '+e.message);}finally{$('go').disabled=false;}};
-const pick=()=>{if(!lastRes)return;const c=$('pickA').checked?(lastRes.alt||lastRes.avoid):lastRes.direct;lastRes.best=c;lastRes.features=c.near;
+const pick=()=>{if(!lastRes)return;const c=$('pickA').checked?lastRes.avoid:$('pickH').checked&&lastRes.third?lastRes.third:lastRes.direct;lastRes.best=c;lastRes.features=c.near;
   const u=gmapsURL(lastO,lastD,c.wps);$('gurl').value=u;$('openG').href=u;$('out').hidden=false;};
-$('pickA').onchange=pick;$('pickD').onchange=pick;
+$('pickA').onchange=pick;$('pickD').onchange=pick;$('pickH').onchange=pick;
 $('copyG').onclick=async()=>{try{await navigator.clipboard.writeText($('gurl').value);}catch{$('gurl').select();document.execCommand('copy');}st('Link copied.');};
 $('kml').onclick=()=>{const b=new Blob([toKML(lastRes,mode,th())],{type:'application/vnd.google-earth.kml+xml'});
   const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`compass-${mode}-${new Date().toISOString().slice(0,10)}.kml`;a.click();};
