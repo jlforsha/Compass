@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Compass</title>
+<link rel="manifest" id="mf" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--fg:#e2e8f0;--mut:#94a3b8;--acc:#38bdf8;--bad:#ef4444;--warn:#f97316;--ok:#86efac}
+*{box-sizing:border-box}body{margin:0;font:16px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg);padding:env(safe-area-inset-top) 0 40px}
+header{padding:14px 16px;font-size:22px;font-weight:700}header small{font-weight:400;color:var(--mut);font-size:13px;display:block}
+.card{background:var(--card);margin:10px 12px;padding:14px;border-radius:14px}
+label{display:block;font-size:14px;color:var(--mut);margin:8px 0 4px}
+input[type=text]{width:100%;padding:14px;font-size:16px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:var(--fg)}
+button,.btn{display:inline-block;min-height:48px;padding:12px 16px;font-size:16px;border-radius:10px;border:0;background:#334155;color:var(--fg);margin:4px 4px 4px 0;text-decoration:none;text-align:center}
+button.pri{background:var(--acc);color:#04263a;font-weight:700;width:100%}
+.row{display:flex;gap:8px;align-items:center}.row>*{flex:1}
+.seg{display:flex}.seg button{flex:1;margin:0;border-radius:0}.seg button:first-child{border-radius:10px 0 0 10px}.seg button:last-child{border-radius:0 10px 10px 0}.seg button.on{background:var(--acc);color:#04263a;font-weight:700}
+input[type=range]{width:100%;height:36px}.val{font-variant-numeric:tabular-nums;color:var(--acc);font-weight:700}
+#map{height:55vh;margin:10px 12px;border-radius:14px}
+.demo{background:#7c2d12;color:#fed7aa;padding:8px 12px;border-radius:10px;font-weight:700;font-size:14px}
+.note{font-size:13px;color:var(--mut)}#status{white-space:pre-wrap;font-size:14px}
+textarea{width:100%;font-size:13px;background:#0b1220;color:var(--fg);border-radius:8px;border:1px solid #334155;padding:8px}
+</style>
+</head>
+<body>
+<header>🧭 Compass<small>Route preview with VVI-based area flags</small></header>
+
+<div class="card">
+  <label>Start</label>
+  <button id="locBtn" style="width:100%">📍 Use my location</button>
+  <input type="text" id="origin" placeholder="…or type a start address / place">
+  <label>Destination</label>
+  <input type="text" id="dest" placeholder="e.g. Waco, TX">
+  <label>Area type</label>
+  <div class="seg"><button id="mZip" class="on">ZIP codes</button><button id="mTract">Census tracts</button></div>
+</div>
+
+<div class="card">
+  <div class="demo" id="dataBadge" style="background:#14532d;color:#bbf7d0">Source: <a style="color:#bbf7d0" href="https://www.vizient.com/products/vizient-vulnerability-index-public-access" target="_blank" rel="noopener">Vizient VVI 2026 public data</a> (Texas ZIPs &amp; tracts) <span id="dataStatus">loading…</span></div>
+  <p class="note">Slider 1–10 sets a VVI threshold: threshold = 0.5×(n−5)+1.0, so 1 = −1.0, 5 = +1.0, 10 = +3.5. VVI scores are standard deviations from the national mean. Areas scoring <b>above</b> a threshold are flagged. Scores &gt; 1.0 are considered high.</p>
+  <div id="sliders"></div>
+  <div class="row"><button id="saveTh">💾 Save thresholds</button><button id="resetTh">Reset</button></div>
+  <label>Optional: load real VVI CSV (geoid,public_safety,clean_environment,overall)</label>
+  <input type="file" id="csv" accept=".csv,text/csv">
+</div>
+
+<div class="card"><button class="pri" id="go">Calculate route</button><div id="status" class="note"></div></div>
+<div id="map"></div>
+
+<div class="card" id="out" hidden>
+  <label>1. Navigate in Google Maps</label>
+  <textarea id="gurl" rows="3" readonly></textarea>
+  <div class="row"><a class="btn" id="openG" target="_blank" rel="noopener">Open in Google Maps</a><button id="copyG">Copy link</button></div>
+  <label>2. Shaded overlay for Google My Maps</label>
+  <div class="row"><button id="kml">⬇ Download KML</button><a class="btn" href="https://www.google.com/maps/d/" target="_blank" rel="noopener">Open My Maps</a></div>
+  <p class="note">In My Maps: Create a new map → Import → choose the downloaded .kml file.</p>
+</div>
+
+<div class="card note"><b>Limitations:</b> avoidance is a <i>preference</i> — Compass picks the least-exposed OSRM alternative and may add up to 3 detour waypoints; it cannot hard-block areas the way Maps avoids tolls. Google Maps may re-route between waypoints differently. The Google Maps link carries the route, not the shading (shading lives in My Maps via KML). Routing uses the public OSRM demo server and geocoding uses Nominatim (fair-use limits). VVI scores: Vizient Vulnerability Index 2026 public file (no login). Areas without data are shown grey and never flagged.</div>
+
+<script>
+/* ===== Core logic (no DOM) ===== */
+const DOMAINS=[{k:'public_safety',n:'Public Safety',d:6},{k:'clean_environment',n:'Clean Environment',d:6},{k:'overall',n:'Overall VVI',d:6}];
+const sliderToScore=n=>0.5*(n-5)+1.0;
+const TIGER={zip:'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/PUMA_TAD_TAZ_UGA_ZCTA/MapServer/1/query',
+             tract:'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Tracts_Blocks/MapServer/0/query'};
+let realVVI=null; // CSV override: geoid -> {public_safety,...}
+const VVI={zip:null,tract:null};
+function setVVI(mode,j){const f=j.fields,m={};for(const[k,a]of Object.entries(j.data)){const o={};f.forEach((n,i)=>o[n]=a[i]);m[k]=o;}VVI[mode]=m;return Object.keys(m).length;}
+async function loadVVI(base=''){const n={};for(const mode of['zip','tract']){const r=await fetch(base+'vvi_tx_'+mode+'.json');n[mode]=setVVI(mode,await r.json());}return n;}
+
+function hash(str){let h=2166136261>>>0;for(const c of str){h^=c.charCodeAt(0);h=Math.imul(h,16777619)>>>0;}
+  h^=h>>>13;h=Math.imul(h,0x5bd1e995)>>>0;h^=h>>>15;return h>>>0;}
+function mockScore(geoid,dom){return Math.round((hash(geoid+'|'+dom)/4294967295*4-2)*100)/100;}
+/** Single swap-in point for real data. */
+function lookupVVI(geoid,mode){
+  if(realVVI&&realVVI[geoid])return {...realVVI[geoid],nodata:false};
+  const v=VVI[mode]&&VVI[mode][geoid];if(v)return {...v,nodata:false};
+  const o={nodata:true};for(const d of DOMAINS)o[d.k]=null;return o;}
+function parseCSV(txt){const lines=txt.trim().split(/\r?\n/);const hdr=lines.shift().split(',').map(s=>s.trim().toLowerCase());
+  const m={};for(const l of lines){const c=l.split(',');const r={};hdr.forEach((h,i)=>r[h]=c[i]&&c[i].trim());
+    if(!r.geoid)continue;m[r.geoid]={public_safety:+r.public_safety,clean_environment:+r.clean_environment,overall:+r.overall};}return m;}
+
+async function geocode(q){
+  const u='https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&viewbox=-106.65,36.5,-93.5,25.84&q='+encodeURIComponent(q);
+  const r=await fetch(u,{headers:{'Accept':'application/json'}});const j=await r.json();
+  if(!j.length)throw new Error('Could not find "'+q+'"');return {lat:+j[0].lat,lon:+j[0].lon,label:j[0].display_name};}
+async function osrm(points,alts){
+  const c=points.map(p=>p.lon.toFixed(6)+','+p.lat.toFixed(6)).join(';');
+  const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${c}?overview=full&geometries=geojson&alternatives=${alts?'true':'false'}`);
+  const j=await r.json();if(j.code!=='Ok')throw new Error('OSRM: '+(j.message||j.code));return j.routes;}
+async function fetchAreas(line,mode){
+  const [w,s,e,n]=turf.bbox(turf.buffer(line,1,{units:'kilometers'}));
+  const out=new Map();
+  // tile large envelopes to avoid server record limits
+  const nx=Math.max(1,Math.ceil((e-w)/0.6)),ny=Math.max(1,Math.ceil((n-s)/0.6));
+  const jobs=[];
+  for(let i=0;i<nx;i++)for(let k=0;k<ny;k++){
+    const env=[w+(e-w)*i/nx,s+(n-s)*k/ny,w+(e-w)*(i+1)/nx,s+(n-s)*(k+1)/ny];
+    const cell=turf.bboxPolygon(env);
+    if(!turf.booleanIntersects(cell,turf.buffer(line,1,{units:'kilometers'})))continue;
+    const p=new URLSearchParams({geometry:env.join(','),geometryType:'esriGeometryEnvelope',inSR:'4326',spatialRel:'esriSpatialRelIntersects',
+      outFields:'GEOID,NAME',returnGeometry:'true',outSR:'4326',maxAllowableOffset:'0.0015',f:'geojson'});
+    jobs.push(fetch(TIGER[mode]+'?'+p).then(r=>r.json()).then(j=>{for(const f of j.features||[])out.set(f.properties.GEOID,f);}));
+  }
+  await Promise.all(jobs);return [...out.values()];}
+function annotate(features,mode,th){
+  for(const f of features){const v=lookupVVI(f.properties.GEOID,mode);f.properties.vvi=v;
+    f.properties.over=v.nodata?[]:DOMAINS.filter(d=>v[d.k]!=null&&v[d.k]>th[d.k]).map(d=>d.n);f.properties.flag=f.properties.over.length>0;}
+  return features;}
+/** km of route inside flagged polygons + list of flagged ids touched */
+function exposure(line,features){
+  let km=0;const hit=new Set();
+  const flagged=features.filter(f=>f.properties.flag&&turf.booleanIntersects(f,line));
+  if(!flagged.length)return {km:0,hit:[]};
+  const coords=line.geometry.coordinates;
+  for(let i=1;i<coords.length;i++){const a=coords[i-1],b=coords[i];const mid=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+    for(const f of flagged){if(turf.booleanPointInPolygon(mid,f)){km+=turf.distance(a,b);hit.add(f.properties.GEOID);break;}}}
+  return {km,hit:[...hit]};}
+function detourPoint(line,f){
+  const c=turf.centroid(f);const near=turf.nearestPointOnLine(line,c);
+  const bb=turf.bbox(f);const size=Math.max(turf.distance([bb[0],bb[1]],[bb[2],bb[1]]),turf.distance([bb[0],bb[1]],[bb[0],bb[3]]));
+  // direction perpendicular to route at nearest point
+  const idx=Math.max(1,Math.min(line.geometry.coordinates.length-1,near.properties.index+1));
+  const a=line.geometry.coordinates[idx-1],b=line.geometry.coordinates[idx];
+  const brg=turf.bearing(a,b);
+  // pick side away from centroid
+  const side=(turf.bearing(near,c)-brg+540)%360-180>0?-90:90;
+  const p=turf.destination(near,size*0.6+1.5,brg+side);
+  return {lon:p.geometry.coordinates[0],lat:p.geometry.coordinates[1]};}
+async function plan(origin,dest,mode,th,log=()=>{}){
+  log('Routing…');const routes=await osrm([origin,dest],true);
+  const lines=routes.map(r=>turf.lineString(r.geometry.coordinates));
+  log(`Got ${routes.length} route option(s). Fetching ${mode==='zip'?'ZIP':'tract'} boundaries…`);
+  const all=turf.featureCollection(lines.flatMap(l=>l.geometry.coordinates.length?[l]:[]));
+  const union=turf.lineString(lines.flatMap(l=>l.geometry.coordinates));
+  let features=annotate(await fetchAreas(union,mode),mode,th);
+  let cands=lines.map((l,i)=>({line:l,route:routes[i],wps:[],exp:exposure(l,features)}));
+  cands.sort((a,b)=>a.exp.km-b.exp.km||a.route.duration-b.route.duration);
+  let best=cands[0];
+  log(`Best alternative: ${best.exp.km.toFixed(1)} km in flagged areas.`);
+  const tried=new Set();
+  for(let t=0;t<2&&best.exp.hit.length&&best.wps.length<3;t++){
+    const gid=best.exp.hit.find(g=>!tried.has(g));if(!gid)break;tried.add(gid);
+    const f=features.find(x=>x.properties.GEOID===gid);const wp=detourPoint(best.line,f);
+    const wps=[...best.wps,wp].slice(0,3);
+    // order waypoints along route
+    wps.sort((p,q)=>turf.nearestPointOnLine(best.line,[p.lon,p.lat]).properties.location-turf.nearestPointOnLine(best.line,[q.lon,q.lat]).properties.location);
+    try{const r=(await osrm([origin,...wps,dest],false))[0];const l=turf.lineString(r.geometry.coordinates);
+      const more=annotate(await fetchAreas(l,mode),mode,th);const ids=new Set(features.map(x=>x.properties.GEOID));
+      for(const m of more)if(!ids.has(m.properties.GEOID))features.push(m);
+      const e=exposure(l,features);
+      log(`Detour around ${gid}: ${e.km.toFixed(1)} km flagged (+${Math.round((r.duration-best.route.duration)/60)} min).`);
+      const tooLong=r.duration>cands[0].route.duration*1.5;
+      if(e.km<best.exp.km-0.1&&!tooLong)best={line:l,route:r,wps,exp:e};
+    }catch(err){log('Detour failed: '+err.message);}
+  }
+  const near=features.filter(f=>turf.booleanIntersects(f,best.line));
+  return {best,cands,features:near};}
+function gmapsURL(o,d,wps){
+  const f=p=>p.lat.toFixed(6)+','+p.lon.toFixed(6);
+  let u='https://www.google.com/maps/dir/?api=1&origin='+encodeURIComponent(f(o))+'&destination='+encodeURIComponent(f(d));
+  if(wps.length)u+='&waypoints='+encodeURIComponent(wps.map(f).join('|'));return u+'&travelmode=driving';}
+function esc(s){return String(s).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));}
+function toKML(res,mode,th){
+  const ring=r=>r.map(c=>c[0]+','+c[1]+',0').join(' ');
+  const polys=g=>(g.type==='Polygon'?[g.coordinates]:g.coordinates).map(p=>`<Polygon><outerBoundaryIs><LinearRing><coordinates>${ring(p[0])}</coordinates></LinearRing></outerBoundaryIs>${p.slice(1).map(h=>`<innerBoundaryIs><LinearRing><coordinates>${ring(h)}</coordinates></LinearRing></innerBoundaryIs>`).join('')}</Polygon>`).join('');
+  const pm=res.features.map(f=>{const v=f.properties.vvi;const st=f.properties.flag?(f.properties.over.length>1?'high':'flag'):(v.nodata?'nodata':'ok');
+    const desc=DOMAINS.map(d=>`${d.n}: ${v[d.k]}`).join('<br>')+(v.nodata?'<br>No VVI data':'')+(f.properties.flag?'<br>Over: '+f.properties.over.join(', '):'');
+    return `<Placemark><name>${esc(f.properties.NAME)}</name><description><![CDATA[${desc}]]></description><styleUrl>#${st}</styleUrl><MultiGeometry>${polys(f.geometry)}</MultiGeometry></Placemark>`;}).join('\n');
+  const S=(id,c)=>`<Style id="${id}"><LineStyle><color>ff${c}</color><width>1</width></LineStyle><PolyStyle><color>80${c}</color></PolyStyle></Style>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Compass ${mode==='zip'?'ZIP':'Tract'} overlay</name>
+${S('high','4444ef')}${S('flag','1673f9')}${S('ok','acef86')}${S('nodata','9ca3af')}<Style id="route"><LineStyle><color>fff8bd38</color><width>5</width></LineStyle></Style>
+<Folder><name>Areas</name>${pm}</Folder><Placemark><name>Route</name><styleUrl>#route</styleUrl><LineString><tessellate>1</tessellate><coordinates>${res.best.line.geometry.coordinates.map(c=>c[0]+','+c[1]).join(' ')}</coordinates></LineString></Placemark></Document></kml>`;}
+if(typeof module!=='undefined')module.exports={setVVI,VVI,sliderToScore,lookupVVI,parseCSV,osrm,fetchAreas,annotate,exposure,plan,gmapsURL,toKML,DOMAINS,setReal:m=>realVVI=m};
+</script>
+<script>
+/* ===== UI ===== */
+if(typeof document!=='undefined'){
+const $=id=>document.getElementById(id);
+let mode='zip',originPt=null,lastRes=null,lastO,lastD;
+const saved=JSON.parse(localStorage.getItem('compass.th')||'null');
+const sl={};
+for(const d of DOMAINS){const v=saved?.[d.k]??d.d;
+  $('sliders').insertAdjacentHTML('beforeend',`<label>${d.n}: <span class="val" id="v_${d.k}"></span></label><input type="range" min="1" max="10" step="1" value="${v}" id="s_${d.k}">`);
+  sl[d.k]=$('s_'+d.k);const upd=()=>{const s=sliderToScore(+sl[d.k].value);$('v_'+d.k).textContent=`${sl[d.k].value} → ${s>=0?'+':''}${s.toFixed(2)}${s>1?' (high)':s===1?' (high cutoff)':''}`;};
+  sl[d.k].oninput=upd;upd();}
+const th=()=>Object.fromEntries(DOMAINS.map(d=>[d.k,sliderToScore(+sl[d.k].value)]));
+$('saveTh').onclick=()=>{localStorage.setItem('compass.th',JSON.stringify(Object.fromEntries(DOMAINS.map(d=>[d.k,+sl[d.k].value]))));st('Thresholds saved.');};
+$('resetTh').onclick=()=>{for(const d of DOMAINS){sl[d.k].value=d.d;sl[d.k].oninput();}};
+const setMode=m=>{mode=m;$('mZip').classList.toggle('on',m==='zip');$('mTract').classList.toggle('on',m==='tract');};
+$('mZip').onclick=()=>setMode('zip');$('mTract').onclick=()=>setMode('tract');
+const st=t=>$('status').textContent=t;const log=t=>$('status').textContent+='\n'+t;
+$('locBtn').onclick=()=>{if(!navigator.geolocation){st('Location not available — type a start address.');$('origin').focus();return;}
+  st('Getting location…');navigator.geolocation.getCurrentPosition(p=>{originPt={lat:p.coords.latitude,lon:p.coords.longitude};
+    $('origin').value=`My location (${originPt.lat.toFixed(5)}, ${originPt.lon.toFixed(5)})`;st('Location set.');},
+    e=>{originPt=null;$('origin').value='';st('Location unavailable ('+e.message+'). Type a start address instead.'+(location.protocol!=='https:'?' (Location needs HTTPS.)':''));$('origin').focus();},
+    {enableHighAccuracy:true,timeout:15000});};
+$('origin').oninput=()=>{originPt=null;};
+$('csv').onchange=async e=>{const f=e.target.files[0];if(!f)return;const m=parseCSV(await f.text());realVVI=m;
+  $('dataBadge').textContent=`CSV loaded: ${Object.keys(m).length} rows override built-in Vizient data`;};
+loadVVI().then(n=>{$('dataStatus').textContent=`✓ ${n.zip} ZIPs, ${n.tract} tracts`;}).catch(e=>{$('dataStatus').textContent='⚠ failed to load VVI data: '+e.message;});
+const map=L.map('map').setView([32.0,-97.2],8);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);
+let layer=L.layerGroup().addTo(map);
+$('go').onclick=async()=>{
+  try{$('go').disabled=true;st('');
+    const o=originPt||await geocode($('origin').value.trim()||(()=>{throw new Error('Enter a start or tap Use my location')})());
+    if(!$('dest').value.trim())throw new Error('Enter a destination');
+    const d=await geocode($('dest').value.trim());
+    const res=await plan(o,d,mode,th(),log);lastRes=res;lastO=o;lastD=d;
+    layer.clearLayers();
+    L.geoJSON(turf.featureCollection(res.features),{style:f=>({color:f.properties.flag?(f.properties.over.length>1?'#ef4444':'#f97316'):(f.properties.vvi.nodata?'#9ca3af':'#86efac'),weight:1,fillOpacity:f.properties.flag?0.5:0.25}),
+      onEachFeature:(f,l)=>{const v=f.properties.vvi;l.bindPopup(`<b>${esc(f.properties.NAME)}</b><br>`+DOMAINS.map(x=>`${x.n}: ${v[x.k]}`).join('<br>')+(v.nodata?'<br><i>No VVI data</i>':'')+(f.properties.flag?'<br><b>Over:</b> '+f.properties.over.join(', '):''));}}).addTo(layer);
+    for(const c of res.cands)if(c.line!==res.best.line)L.geoJSON(c.line,{style:{color:'#64748b',weight:3,dashArray:'6 6'}}).addTo(layer);
+    const rl=L.geoJSON(res.best.line,{style:{color:'#38bdf8',weight:6}}).addTo(layer);
+    [o,...res.best.wps,d].forEach((p,i,a)=>L.circleMarker([p.lat,p.lon],{radius:8,color:'#fff',fillColor:i===0?'#22c55e':i===a.length-1?'#ef4444':'#eab308',fillOpacity:1}).addTo(layer));
+    map.fitBounds(rl.getBounds(),{padding:[20,20]});
+    const nf=res.features.filter(f=>f.properties.flag).length;
+    log(`Done: ${(res.best.route.distance/1609.34).toFixed(1)} mi, ${Math.round(res.best.route.duration/60)} min, ${res.best.wps.length} waypoint(s). ${res.features.length} areas on route, ${nf} flagged; ${res.best.exp.km.toFixed(1)} km in flagged areas.`);
+    const u=gmapsURL(o,d,res.best.wps);$('gurl').value=u;$('openG').href=u;$('out').hidden=false;
+  }catch(e){log('⚠ '+e.message);}finally{$('go').disabled=false;}};
+$('copyG').onclick=async()=>{try{await navigator.clipboard.writeText($('gurl').value);}catch{$('gurl').select();document.execCommand('copy');}st('Link copied.');};
+$('kml').onclick=()=>{const b=new Blob([toKML(lastRes,mode,th())],{type:'application/vnd.google-earth.kml+xml'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`compass-${mode}-${new Date().toISOString().slice(0,10)}.kml`;a.click();};
+// PWA: SW only over https; manifest data-URL fallback when opened as a lone file
+if(location.protocol==='https:'&&'serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+if(location.protocol==='file:'){$('mf').href='data:application/manifest+json,'+encodeURIComponent(JSON.stringify({name:'Compass',short_name:'Compass',start_url:'.',display:'standalone',background_color:'#0f172a',theme_color:'#0f172a'}));}
+}
+</script>
+</body>
+</html>
