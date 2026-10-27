@@ -190,11 +190,16 @@ async function fetchAreas(line,mode,base=''){
     if(mx.length&&[[env[0],env[1]],[env[2],env[1]],[env[0],env[3]],[env[2],env[3]],[(env[0]+env[2])/2,(env[1]+env[3])/2]].every(inMX))continue;
     const p=new URLSearchParams({geometry:env.join(','),geometryType:'esriGeometryEnvelope',inSR:'4326',spatialRel:'esriSpatialRelIntersects',
       outFields:'GEOID,NAME',returnGeometry:'true',outSR:'4326',maxAllowableOffset:'0.0015',f:'geojson'});
-    jobs.push(fetch(TIGER[mode]+'?'+p).then(r=>r.json()).then(j=>{for(const f of j.features||[]){f.properties.country='US';out.set(f.properties.GEOID,f);}}).catch(()=>{}));
+    jobs.push(TIGER[mode]+'?'+p);
   }
-  await Promise.all(jobs);
+  // TIGERweb: limited concurrency + timeout + retries; failures are counted and reported (previously swallowed silently -> whole route looked "no data")
+  const one=async u=>{for(let t=0;t<3;t++){try{const ac=new AbortController();const to=setTimeout(()=>ac.abort(),30000);
+      const r=await fetch(u,{signal:ac.signal});clearTimeout(to);if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();if(j.error)throw new Error(j.error.message||'error');
+      for(const f of j.features||[]){f.properties.country='US';out.set(f.properties.GEOID,f);}return true;}catch(e){fetchAreas.lastErr=e.message||String(e);await new Promise(r=>setTimeout(r,800*(t+1)));}}return false;};
+  let failed=0,qi=0;await Promise.all(Array.from({length:Math.min(4,jobs.length)},async()=>{while(qi<jobs.length){const u=jobs[qi++];if(!await one(u))failed++;}}));
+  const tigerNote=failed?`⚠ Census TIGERweb boundary lookup failed for ${failed} of ${jobs.length} map tiles (${fetchAreas.lastErr}); those areas show no polygons and count as "no data". Check your connection and plan the route again.`:null;
   try{await ensureVVIStates(vviStatesFor([...out.keys()],mode),mode,base);}catch(e){fetchAreas.vviErr='VVI state data failed to load: '+e.message;}
-  try{const w=await worldAreas(reg,base);for(const f of w.feats)if(!out.has(f.properties.GEOID))out.set(f.properties.GEOID,f);fetchAreas.notes=w.notes;if(fetchAreas.vviErr){w.notes.push(fetchAreas.vviErr);fetchAreas.vviErr=null;}}catch(e){fetchAreas.notes=['Worldwide data failed to load: '+e.message];}
+  try{const w=await worldAreas(reg,base);for(const f of w.feats)if(!out.has(f.properties.GEOID))out.set(f.properties.GEOID,f);fetchAreas.notes=w.notes;if(tigerNote)w.notes.unshift(tigerNote);if(fetchAreas.vviErr){w.notes.push(fetchAreas.vviErr);fetchAreas.vviErr=null;}}catch(e){fetchAreas.notes=['Worldwide data failed to load: '+e.message];if(tigerNote)fetchAreas.notes.unshift(tigerNote);}
   return [...out.values()];}
 function annotate(features,mode,th){
   for(const f of features){const pp=f.properties;const v=pp.wsrc!==undefined?{public_safety:pp.wps,overall:null,clean_environment:null,nodata:pp.wps==null,gran:pp.gran,src:{public_safety:`${pp.wsrc} [${pp.gran}]`,overall:'unavailable outside US/Mexico',clean_environment:'unavailable outside US'}}:pp.country==='MX'?{public_safety:mxPS(pp),overall:pp.ov,clean_environment:null,nodata:pp.ps==null&&pp.ov==null,src:{public_safety:`SESNSP municipal incidence 2025 (${pp.hom??'?'} homicides/100k; max of Mexico-relative score ${pp.ps} and world homicide scale)`,overall:'CONEVAL Índice de Rezago Social 2020',clean_environment:'unavailable for Mexico'}}:lookupVVI(pp.GEOID,mode);f.properties.vvi=v;

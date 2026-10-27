@@ -52,7 +52,7 @@ Dark red / red / orange = over threshold (sev ≥1.5 / ≥0.75 / >0). Yellow = u
 Photon `https://photon.komoot.io/api/?q=…&limit=6&lat=…&lon=…` (Nominatim policy forbids autocomplete). 300 ms debounce, min 3 chars, AbortController cancels stale requests, bias = GPS fix → start point (for destination) → map centre. Picking stores exact lat/lon (no re-geocoding); typing again clears it.
 
 ## Service worker
-`sw.js`: cache name `compass-vN`; precaches app shell + bundled JSON; network-first with `fetch(…,{cache:'no-store'})` for same-origin, cache fallback offline; cross-origin APIs untouched. **Bump the version on every deployed change** (currently `compass-v14`; per-state `vvi/*_SS.json` are not precached, only cached at runtime when a route loads them).
+`sw.js`: cache name `compass-vN`; precaches app shell + bundled JSON; network-first with `fetch(…,{cache:'no-store'})` for same-origin, cache fallback offline; cross-origin APIs untouched. **Bump the version on every deployed change** (currently `compass-v15`; per-state `vvi/*_SS.json` are not precached, only cached at runtime when a route loads them).
 
 ## Hosting
 GitHub Pages, repo `jlforsha/Compass`, branch `main`, site https://jlforsha.github.io/Compass/. Files are uploaded through GitHub's web upload page (no git/gh credentials on the build box). Netlify was abandoned (account suspended).
