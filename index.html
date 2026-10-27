@@ -57,8 +57,8 @@ textarea{width:100%;font-size:13px;background:#0b1220;color:var(--fg);border-rad
   <label>Highway weight: <span class="val" id="v_hwyWeight"></span></label>
   <input type="range" id="o_hwyWeight" min="0" max="1" step="0.1" value="0.3">
   <p class="note">Flagged-area km on Interstate / US / SH-TX / Loop / Spur roads count at this fraction of local-road km (0.3 = 30%).</p>
-  <label>Max extra time for a detour: <span class="val" id="v_maxExtraMin"></span></label>
-  <input type="range" id="o_maxExtraMin" min="0" max="90" step="5" value="30">
+  <label>Max extra time for the avoidance route: <span class="val" id="v_maxExtraMin"></span></label>
+  <input type="range" id="o_maxExtraMin" min="0" max="90" step="5" value="90">
   <label class="chk"><input type="checkbox" id="o_fmIsHwy"> Count Farm-to-Market (FM/RM) roads as highways</label>
   <label>Google-style route options</label>
   <label class="chk"><input type="checkbox" id="o_avoidTolls"> Avoid tolls</label>
@@ -73,6 +73,9 @@ textarea{width:100%;font-size:13px;background:#0b1220;color:var(--fg);border-rad
 <div id="map"></div>
 
 <div class="card" id="out" hidden>
+  <label>Route for the link</label>
+  <label class="chk"><input type="radio" name="pick" id="pickA"> Avoidance route (blue)</label>
+  <label class="chk"><input type="radio" name="pick" id="pickD"> Direct route (black dashed)</label>
   <label>1. Navigate in Google Maps</label>
   <textarea id="gurl" rows="3" readonly></textarea>
   <div class="row"><a class="btn" id="openG" target="_blank" rel="noopener">Open in Google Maps</a><button id="copyG">Copy link</button></div>
@@ -89,7 +92,7 @@ const DOMAINS=[{k:'public_safety',n:'Public Safety',d:6},{k:'clean_environment',
 const sliderToScore=n=>0.5*(n-5)+1.0;
 const TIGER={zip:'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/PUMA_TAD_TAZ_UGA_ZCTA/MapServer/1/query',
              tract:'https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Tracts_Blocks/MapServer/0/query'};
-const OPTS={hwyPref:true,hwyWeight:0.3,maxExtraMin:30,fmIsHwy:false,avoidTolls:false,avoidHwy:false,avoidFerry:false};
+const OPTS={hwyPref:true,hwyWeight:0.3,maxExtraMin:90,fmIsHwy:false,avoidTolls:false,avoidHwy:false,avoidFerry:false};
 /** Classify an OSRM step by ref/name. hwy = Interstate/US/SH/TX/Loop/Spur (FM optional). */
 function classifyStep(st,opts=OPTS){
   const t=((st.ref||'')+' ; '+(st.name||''));
@@ -152,7 +155,7 @@ async function fetchAreas(line,mode){
   await Promise.all(jobs);return [...out.values()];}
 function annotate(features,mode,th){
   for(const f of features){const v=lookupVVI(f.properties.GEOID,mode);f.properties.vvi=v;
-    f.properties.over=v.nodata?[]:DOMAINS.filter(d=>v[d.k]!=null&&v[d.k]>th[d.k]).map(d=>d.n);f.properties.flag=f.properties.over.length>0;}
+    f.properties.over=v.nodata?[]:DOMAINS.filter(d=>v[d.k]!=null&&v[d.k]>th[d.k]).map(d=>d.n);f.properties.sev=v.nodata?0:DOMAINS.reduce((a,d)=>a+(v[d.k]!=null&&v[d.k]>th[d.k]?v[d.k]-th[d.k]:0),0);f.properties.flag=f.properties.over.length>0;}
   return features;}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let _lastOsrm=0;
@@ -160,7 +163,7 @@ async function osrmPolite(points,alts){const w=_lastOsrm+350-Date.now();if(w>0)a
   for(let i=0;i<3;i++){try{return await osrm(points,alts);}catch(e){if(i===2)throw e;await sleep(1200*(i+1));}}}
 /** Full cost breakdown of a route: flagged km (primary), highway/toll/ferry penalties, time. */
 function exposure(line,features,route,opts=OPTS){
-  let km=0,hwyKm=0,mwKm=0,tollKm=0,ferryKm=0;const hit=new Set();
+  let km=0,wkm=0,whwy=0,hwyKm=0,mwKm=0,tollKm=0,ferryKm=0;const hit=new Set();
   const lb=turf.bbox(line);
   const flagged=features.filter(f=>{if(!f.properties.flag)return false;const b=f.bbox||(f.bbox=turf.bbox(f));
     return !(b[0]>lb[2]||b[2]<lb[0]||b[1]>lb[3]||b[3]<lb[1]);});
@@ -170,13 +173,13 @@ function exposure(line,features,route,opts=OPTS){
       if(sg.motorway)mwKm+=d;if(sg.toll)tollKm+=d;if(sg.ferry)ferryKm+=d;
       const mid=[(a[0]+b[0])/2,(a[1]+b[1])/2];
       for(const f of flagged){const bb=f.bbox;if(mid[0]<bb[0]||mid[0]>bb[2]||mid[1]<bb[1]||mid[1]>bb[3])continue;
-        if(turf.booleanPointInPolygon(mid,f)){km+=d;if(sg.hwy)hwyKm+=d;hit.add(f.properties.GEOID);break;}}}}
+        if(turf.booleanPointInPolygon(mid,f)){const sv=d*(0.1+f.properties.sev);km+=d;wkm+=sv;if(sg.hwy){hwyKm+=d;whwy+=sv;}hit.add(f.properties.GEOID);break;}}}}
   // Highway preference only applies when NOT avoiding highways (avoid-highways always wins).
   const w=(opts.hwyPref&&!opts.avoidHwy)?opts.hwyWeight:1;
   const viol=route&&route.legs?routeViolations(route,opts):[];
-  const pen=(opts.avoidHwy?mwKm*0.15:0)+(opts.avoidTolls?tollKm*2:0)+(opts.avoidFerry?ferryKm*5:0);
-  const flagScore=(km-hwyKm)+hwyKm*w;
-  return {km,hwyKm,mwKm,tollKm,ferryKm,hwyShare:km?hwyKm/km:0,flagScore,pen,score:flagScore+pen,viol,hit:[...hit]};}
+  const pen=(opts.avoidHwy?mwKm*0.05:0)+(opts.avoidTolls?tollKm*2:0)+(opts.avoidFerry?ferryKm*5:0);
+  const flagScore=(wkm-whwy)+whwy*w;
+  return {km,wkm,hwyKm,mwKm,tollKm,ferryKm,hwyShare:km?hwyKm/km:0,flagScore,pen,score:flagScore+pen,viol,hit:[...hit]};}
 const MIN_PER_KM=0.1; // 10 extra minutes ~ 1 flagged km in the tie-break score
 function totalScore(c,base){return c.exp.score+Math.max(0,(c.route.duration-base.route.duration)/60)*MIN_PER_KM;}
 /** Point offset perpendicular to the straight origin->dest axis at fraction t, distance km, side +1 (left/north-ish) or -1. */
@@ -187,12 +190,13 @@ function sideName(o,d,side){const brg=turf.bearing([o.lon,o.lat],[d.lon,d.lat])-
   return ['north','northeast','east','southeast','south','southwest','west','northwest'][Math.round(n/45)%8];}
 /** Unflagged area centroids near the route, on the side away from flagged clusters. */
 function cleanCentroids(line,features,maxKm){const out=[];
-  for(const f of features){if(f.properties.flag||f.properties.vvi.nodata)continue;const c=turf.centroid(f).geometry.coordinates;
+  const lim=[...features].filter(f=>!f.properties.vvi.nodata).map(f=>f.properties.sev).sort((a,b)=>a-b)[Math.floor(features.length*0.25)]||0;
+  for(const f of features){if(f.properties.vvi.nodata||f.properties.sev>lim)continue;const c=turf.centroid(f).geometry.coordinates;
     const n=turf.nearestPointOnLine(line,c);const dist=n.properties.dist;if(dist<2||dist>maxKm)continue;
     out.push({lon:c[0],lat:c[1],loc:n.properties.location,dist,id:f.properties.GEOID});}
   return out;}
 async function plan(origin,dest,mode,th,log=()=>{},opts=OPTS){
-  const maxExtra=(opts.maxExtraMin??30)*60;
+  const maxExtra=(opts.maxExtraMin??90)*60;
   log('Routing…');const routes=await osrmPolite([origin,dest],true);
   const lines=routes.map(r=>turf.lineString(r.geometry.coordinates));
   log(`Got ${routes.length} route option(s). Fetching ${mode==='zip'?'ZIP':'tract'} boundaries for the corridor…`);
@@ -214,7 +218,8 @@ async function plan(origin,dest,mode,th,log=()=>{},opts=OPTS){
       const extra=(r.duration-direct.route.duration)/60;
       log(`${label}: ${c.exp.km.toFixed(1)} km flagged, ${extra>=0?'+':''}${Math.round(extra)} min${c.exp.viol.length?' (uses '+c.exp.viol.join(', ')+')':''}.`);
       return c;}catch(e){log(`${label}: failed (${e.message})`);return null;}};
-  const accept=c=>c&&c.route.duration-direct.route.duration<=maxExtra&&c.exp.km<=best.exp.km+0.2&&totalScore(c,direct)<totalScore(best,direct)-0.3;
+  const accept=c=>c&&c.route.duration-direct.route.duration<=maxExtra&&totalScore(c,direct)<totalScore(best,direct)*0.98;
+  best=direct;
   if(direct.exp.km>0.3||direct.exp.pen>0.5){
     // Round 1: corridor offsets, both sides, several distances, 1-3 waypoints.
     const shapes=[[0.5],[0.33,0.67],[0.25,0.5,0.75]];
@@ -222,25 +227,29 @@ async function plan(origin,dest,mode,th,log=()=>{},opts=OPTS){
       if(dist>=20&&ts.length===3)continue; // keep request count polite
       const c=await tryWps(ts.map(t=>offsetPt(origin,dest,t,dist,side)),`${dist} km ${sideName(origin,dest,side)} (${ts.length} wp)`);
       if(accept(c))best=c;}
+    // Major corridors near DFW (only used if inside the fetched band): SH-114/SH-183 north, I-20 south, SH-121/I-635 far north
+    const CORR=[['SH-183 (Euless/Irving)',[[32.835,-97.10],[32.838,-96.98]]],['SH-114 (Grapevine/DFW)',[[32.92,-97.15],[32.90,-97.02]]],['I-635/SH-121 north',[[32.93,-97.10],[32.91,-96.86]]],
+      ['I-20 (Arlington/Grand Prairie)',[[32.677,-97.12],[32.675,-96.95]]],['I-20 south of Dallas',[[32.66,-97.20],[32.66,-96.88]]],['SH-360/I-20',[[32.68,-97.06]]]];
+    const inBand=p=>turf.booleanPointInPolygon([p.lon,p.lat],corridor);
+    for(const[n,pts]of CORR){const w=pts.map(([la,lo])=>({lat:la,lon:lo}));if(!w.every(inBand))continue;
+      const c=await tryWps(w,'via '+n);if(accept(c))best=c;}
     // Round 2 (greedy): from the best route so far, pull remaining flagged stretches toward clean area centroids.
-    for(let it=0;it<3&&best.exp.km>0.3;it++){
+    for(let it=0;it<3&&best.exp.km>0.3;it++){if(best===direct){const b2=[...tried].sort((a,b)=>totalScore(a,direct)-totalScore(b,direct))[0];if(b2)best=b2;}
       const cc=cleanCentroids(best.line,features,12);if(!cc.length)break;
       const hits=features.filter(f=>best.exp.hit.includes(f.properties.GEOID));
-      const scored=cc.map(p=>({p,s:Math.min(...hits.map(h=>turf.distance([p.lon,p.lat],turf.centroid(h))))})).sort((a,b)=>a.s-b.s).slice(0,3);
+      const vOf=id=>{const f=features.find(x=>x.properties.GEOID===id);const v=f.properties.vvi;return DOMAINS.reduce((a,d)=>a+(v[d.k]??0),0);};
+      const scored=cc.map(p=>({p,s:Math.min(...hits.map(h=>turf.distance([p.lon,p.lat],turf.centroid(h))))+3*vOf(p.id)})).sort((a,b)=>a.s-b.s).slice(0,4);
       let improved=false;
       for(const {p} of scored){const wps=[...best.wps,{lon:p.lon,lat:p.lat}].slice(-3);
         const c=await tryWps(wps,`Refine via clean ${mode==='zip'?'ZIP':'tract'} ${p.id}`);if(accept(c)){best=c;improved=true;break;}}
       if(!improved)break;}
   }
+  const avoid=best;const red=direct.exp.score>0?1-avoid.exp.score/direct.exp.score:0;
+  const chosen=(avoid!==direct&&red>=0.2&&avoid.route.duration-direct.route.duration<=maxExtra)?avoid:direct;
   let why='';
-  if(best===direct&&direct.exp.km>0.3){
-    const within=tried.filter(c=>c.route.duration-direct.route.duration<=maxExtra);
-    const minKm=within.length?Math.min(...within.map(c=>c.exp.km)):direct.exp.km;
-    const anyLower=tried.filter(c=>c.exp.km<direct.exp.km*0.85).sort((a,b)=>a.route.duration-b.route.duration)[0];
-    why=`No detour within +${Math.round(maxExtra/60)} min meaningfully reduced flagged distance (best found within the limit: ${minKm.toFixed(1)} km).`+
-      (anyLower?` A lower-exposure option exists (${anyLower.exp.km.toFixed(1)} km, +${Math.round((anyLower.route.duration-direct.route.duration)/60)} min) — raise "Max extra time" to allow it.`:` Flagged areas span the whole corridor: ${Math.round(100*features.filter(f=>f.properties.flag).length/Math.max(1,features.filter(f=>!f.properties.vvi.nodata).length))}% of ${mode==='zip'?'ZIPs':'tracts'} within ~${corrKm} km of the route are over your threshold, so every detour tried ran through as many or more flagged areas. Try a higher threshold or tract mode.`);}
-  const near=features.filter(f=>turf.booleanIntersects(f,best.line));
-  return {best,direct,cands,tried,why,features:near};}
+  if(avoid===direct||red<0.2)why=`No route found that cuts severity-weighted exposure by 20% or more within +${Math.round(maxExtra/60)} min (best: ${Math.round(red*100)}%). ${Math.round(100*features.filter(f=>f.properties.flag).length/Math.max(1,features.filter(f=>!f.properties.vvi.nodata).length))}% of ${mode==='zip'?'ZIPs':'tracts'} in the ~${corrKm} km band are over your threshold.`;
+  for(const c of[direct,avoid])c.near=features.filter(f=>turf.booleanIntersects(f,c.line));
+  return {best:chosen,direct,avoid,red,cands,tried,why,features:chosen.near,allFeatures:features};}
 function gmapsURL(o,d,wps,opts=OPTS){
   const f=p=>p.lat.toFixed(6)+','+p.lon.toFixed(6);
   let u='https://www.google.com/maps/dir/?api=1&origin='+encodeURIComponent(f(o))+'&destination='+encodeURIComponent(f(d));
@@ -250,7 +259,7 @@ function esc(s){return String(s).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&
 function toKML(res,mode,th){
   const ring=r=>r.map(c=>c[0]+','+c[1]+',0').join(' ');
   const polys=g=>(g.type==='Polygon'?[g.coordinates]:g.coordinates).map(p=>`<Polygon><outerBoundaryIs><LinearRing><coordinates>${ring(p[0])}</coordinates></LinearRing></outerBoundaryIs>${p.slice(1).map(h=>`<innerBoundaryIs><LinearRing><coordinates>${ring(h)}</coordinates></LinearRing></innerBoundaryIs>`).join('')}</Polygon>`).join('');
-  const pm=res.features.map(f=>{const v=f.properties.vvi;const st=f.properties.flag?(f.properties.over.length>1?'high':'flag'):(v.nodata?'nodata':'ok');
+  const pm=(res.allFeatures||res.features).map(f=>{const v=f.properties.vvi;const st=f.properties.flag?(f.properties.over.length>1?'high':'flag'):(v.nodata?'nodata':'ok');
     const desc=DOMAINS.map(d=>`${d.n}: ${v[d.k]}`).join('<br>')+(v.nodata?'<br>No VVI data':'')+(f.properties.flag?'<br>Over: '+f.properties.over.join(', '):'');
     return `<Placemark><name>${esc(f.properties.NAME)}</name><description><![CDATA[${desc}]]></description><styleUrl>#${st}</styleUrl><MultiGeometry>${polys(f.geometry)}</MultiGeometry></Placemark>`;}).join('\n');
   const S=(id,c)=>`<Style id="${id}"><LineStyle><color>ff${c}</color><width>1</width></LineStyle><PolyStyle><color>80${c}</color></PolyStyle></Style>`;
@@ -302,18 +311,21 @@ $('go').onclick=async()=>{
     const d=await geocode($('dest').value.trim());
     syncO();const res=await plan(o,d,mode,th(),log,OPTS);lastRes=res;lastO=o;lastD=d;
     layer.clearLayers();
-    L.geoJSON(turf.featureCollection(res.features),{style:f=>({color:f.properties.flag?(f.properties.over.length>1?'#ef4444':'#f97316'):(f.properties.vvi.nodata?'#9ca3af':'#86efac'),weight:1,fillOpacity:f.properties.flag?0.5:0.25}),
-      onEachFeature:(f,l)=>{const v=f.properties.vvi;l.bindPopup(`<b>${esc(f.properties.NAME)}</b><br>`+DOMAINS.map(x=>`${x.n}: ${v[x.k]}`).join('<br>')+(v.nodata?'<br><i>No VVI data</i>':'')+(f.properties.flag?'<br><b>Over:</b> '+f.properties.over.join(', '):''));}}).addTo(layer);
-    for(const c of res.cands)if(c.line!==res.best.line)L.geoJSON(c.line,{style:{color:'#64748b',weight:3,dashArray:'6 6'}}).addTo(layer);
-    const rl=L.geoJSON(res.best.line,{style:{color:'#38bdf8',weight:6}}).addTo(layer);
-    [o,...res.best.wps,d].forEach((p,i,a)=>L.circleMarker([p.lat,p.lon],{radius:8,color:'#fff',fillColor:i===0?'#22c55e':i===a.length-1?'#ef4444':'#eab308',fillOpacity:1}).addTo(layer));
-    map.fitBounds(rl.getBounds(),{padding:[20,20]});
-    const nf=res.features.filter(f=>f.properties.flag).length;
-    const B=res.best,D=res.direct,fm=s=>Math.round(s/60),mi=m=>(m/1609.34).toFixed(1);
-    log(`\n— Result —\nDirect: ${mi(D.route.distance)} mi, ${fm(D.route.duration)} min, ${D.exp.km.toFixed(1)} km in flagged areas.\nChosen: ${B.label} — ${mi(B.route.distance)} mi, ${fm(B.route.duration)} min (+${Math.max(0,fm(B.route.duration-D.route.duration))}), ${B.exp.km.toFixed(1)} km in flagged areas`+(D.exp.km>0?` (${Math.round((1-B.exp.km/D.exp.km)*100)}% less)`:'')+`, ${B.wps.length} waypoint(s), ${Math.round(B.exp.mwKm)} km on freeways.`+
-      (B.exp.viol.length?` ⚠ Still uses ${B.exp.viol.join(', ')} (no acceptable option avoided them).`:'')+(res.why?'\n'+res.why:''));
-    const u=gmapsURL(o,d,res.best.wps);$('gurl').value=u;$('openG').href=u;$('out').hidden=false;
+    const col=f=>{const p=f.properties;if(p.vvi.nodata)return '#9ca3af';if(!p.flag)return '#86efac';return p.sev>=1.5?'#991b1b':p.sev>=0.75?'#ef4444':'#f97316';};
+    L.geoJSON(turf.featureCollection(res.allFeatures),{style:f=>({color:col(f),weight:1,fillOpacity:f.properties.flag?0.45:0.25}),
+      onEachFeature:(f,l)=>{const v=f.properties.vvi;l.bindPopup(`<b>${esc(f.properties.NAME)}</b><br>`+DOMAINS.map(x=>`${x.n}: ${v[x.k]}`).join('<br>')+(v.nodata?'<br><i>No VVI data</i>':'')+(f.properties.flag?`<br><b>Over:</b> ${f.properties.over.join(', ')} (by ${f.properties.sev.toFixed(2)})`:''));}}).addTo(layer);
+    const D=res.direct,A=res.avoid,fm=s=>Math.round(s/60),mi=m=>(m/1609.34).toFixed(1);
+    const dl=L.geoJSON(D.line,{style:{color:'#1e293b',weight:5,dashArray:'8 6'}}).addTo(layer);
+    const al=A!==D?L.geoJSON(A.line,{style:{color:'#2563eb',weight:6}}).addTo(layer):dl;
+    [o,...A.wps,d].forEach((p,i,a)=>L.circleMarker([p.lat,p.lon],{radius:8,color:'#fff',fillColor:i===0?'#22c55e':i===a.length-1?'#ef4444':'#eab308',fillOpacity:1}).addTo(layer));
+    map.fitBounds(L.featureGroup([dl,al]).getBounds(),{padding:[20,20]});
+    const line=(n,c)=>`${n}: ${mi(c.route.distance)} mi, ${fm(c.route.duration)} min${c===D?'':` (+${Math.max(0,fm(c.route.duration-D.route.duration))})`}, ${c.exp.km.toFixed(1)} km flagged, severity-weighted exposure ${c.exp.wkm.toFixed(1)}, ${Math.round(c.exp.mwKm)} km freeway`;
+    log(`\n— Result —\n${line('Direct (black dashed)',D)}\n${A===D?'Avoidance: no better route found':line('Avoidance route (blue, '+A.label+')',A)+` — ${Math.round(res.red*100)}% less weighted exposure`}`+(res.why?'\n'+res.why:''));
+    $('pickA').disabled=A===D;$(res.best===A&&A!==D?'pickA':'pickD').checked=true;pick();
   }catch(e){log('⚠ '+e.message);}finally{$('go').disabled=false;}};
+const pick=()=>{if(!lastRes)return;const c=$('pickA').checked?lastRes.avoid:lastRes.direct;lastRes.best=c;lastRes.features=c.near;
+  const u=gmapsURL(lastO,lastD,c.wps);$('gurl').value=u;$('openG').href=u;$('out').hidden=false;};
+$('pickA').onchange=pick;$('pickD').onchange=pick;
 $('copyG').onclick=async()=>{try{await navigator.clipboard.writeText($('gurl').value);}catch{$('gurl').select();document.execCommand('copy');}st('Link copied.');};
 $('kml').onclick=()=>{const b=new Blob([toKML(lastRes,mode,th())],{type:'application/vnd.google-earth.kml+xml'});
   const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`compass-${mode}-${new Date().toISOString().slice(0,10)}.kml`;a.click();};
