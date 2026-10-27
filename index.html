@@ -12,6 +12,9 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 <style>
+.ac{position:relative}.acl{position:absolute;left:0;right:0;top:100%;z-index:2000;background:#1e293b;border:1px solid #334155;border-radius:10px;margin-top:2px;max-height:60vh;overflow:auto;box-shadow:0 8px 24px #0008}
+.acl div{padding:14px 12px;min-height:44px;border-bottom:1px solid #334155;cursor:pointer;line-height:1.25}.acl div:last-child{border-bottom:0}
+.acl div.on,.acl div:active{background:#334155}.acl b{display:block;color:#f1f5f9}.acl small{color:#94a3b8}
 :root{--bg:#0f172a;--card:#1e293b;--fg:#e2e8f0;--mut:#94a3b8;--acc:#38bdf8;--bad:#ef4444;--warn:#f97316;--ok:#86efac}
 *{box-sizing:border-box}body{margin:0;font:16px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg);padding:env(safe-area-inset-top) 0 40px}
 header{padding:14px 16px;font-size:22px;font-weight:700}header small{font-weight:400;color:var(--mut);font-size:13px;display:block}
@@ -35,9 +38,9 @@ textarea{width:100%;font-size:13px;background:#0b1220;color:var(--fg);border-rad
 <div class="card">
   <label>Start</label>
   <button id="locBtn" style="width:100%">📍 Use my location</button>
-  <input type="text" id="origin" placeholder="…or type a start address / place">
+  <div class="ac"><input type="text" id="origin" autocomplete="off" placeholder="…or type a start address / place"><div class="acl" id="origin_l" hidden></div></div>
   <label>Destination</label>
-  <input type="text" id="dest" placeholder="e.g. Waco, TX">
+  <div class="ac"><input type="text" id="dest" autocomplete="off" placeholder="e.g. Waco, TX"><div class="acl" id="dest_l" hidden></div></div>
   <label>Area type</label>
   <div class="seg"><button id="mZip" class="on">ZIP codes</button><button id="mTract">Census tracts</button></div>
 </div>
@@ -435,7 +438,7 @@ if(typeof module!=='undefined')module.exports={loadExtra,buildAvoid,orsBody,orsR
 /* ===== UI ===== */
 if(typeof document!=='undefined'){
 const $=id=>document.getElementById(id);
-let mode='zip',originPt=null,lastRes=null,lastO,lastD;
+let mode='zip',originPt=null,destPt=null,lastRes=null,lastO,lastD;
 const saved=JSON.parse(localStorage.getItem('compass.th')||'null');
 const sl={};
 for(const d of DOMAINS){const v=saved?.[d.k]??d.d;
@@ -457,11 +460,34 @@ for(const k of OK){$('o_'+k).checked=!!OPTS[k];$('o_'+k).onchange=syncO;}$('o_hw
 const saveAll=()=>{localStorage.setItem('compass.th',JSON.stringify(Object.fromEntries(DOMAINS.map(d=>[d.k,+sl[d.k].value]))));localStorage.setItem('compass.opts',JSON.stringify({...OPTS,orsKey:undefined}));};
 const st=t=>$('status').textContent=t;$('saveOpt').onclick=()=>{saveAll();st('Thresholds and route options saved.');};const log=t=>$('status').textContent+='\n'+t;
 $('locBtn').onclick=()=>{if(!navigator.geolocation){st('Location not available — type a start address.');$('origin').focus();return;}
-  st('Getting location…');navigator.geolocation.getCurrentPosition(p=>{originPt={lat:p.coords.latitude,lon:p.coords.longitude};
+  st('Getting location…');navigator.geolocation.getCurrentPosition(p=>{originPt={lat:p.coords.latitude,lon:p.coords.longitude};window._lastFix=originPt;
     $('origin').value=`My location (${originPt.lat.toFixed(5)}, ${originPt.lon.toFixed(5)})`;st('Location set.');},
     e=>{originPt=null;$('origin').value='';st('Location unavailable ('+e.message+'). Type a start address instead.'+(location.protocol!=='https:'?' (Location needs HTTPS.)':''));$('origin').focus();},
     {enableHighAccuracy:true,timeout:15000});};
-$('origin').oninput=()=>{originPt=null;};
+/* Type-ahead via Photon (komoot) — Nominatim's usage policy forbids autocomplete. */
+function photonLabel(p){const main=p.name||[p.housenumber,p.street].filter(Boolean).join(' ')||p.city||'';
+  const sub=[p.name&&p.street?[p.housenumber,p.street].filter(Boolean).join(' '):'',p.city&&p.city!==main?p.city:'',p.county&&!p.city?p.county:'',p.state,p.country].filter(Boolean).filter((x,i,a)=>a.indexOf(x)===i).join(', ');return {main,sub};}
+function setupAC(id,isStart){const inp=$(id),list=$(id+'_l');let timer=null,ctl=null,items=[],sel=-1;
+  const close=()=>{list.hidden=true;sel=-1;};
+  const choose=it=>{close();if(it.loc){$('locBtn').onclick();return;}const pt={lat:it.lat,lon:it.lon,label:it.full};
+    inp.value=it.full;if(isStart)originPt=pt;else destPt=pt;};
+  const render=()=>{list.innerHTML='';items.forEach((it,i)=>{const d=document.createElement('div');if(i===sel)d.className='on';
+      d.innerHTML=`<b>${esc(it.main)}</b>${it.sub?`<small>${esc(it.sub)}</small>`:''}`;d.addEventListener('pointerdown',e=>{e.preventDefault();choose(it);});list.appendChild(d);});
+    list.hidden=!items.length;};
+  const locItem={loc:true,main:'📍 Current location',sub:'Use this device’s GPS'};
+  inp.addEventListener('input',()=>{if(isStart)originPt=null;else destPt=null;clearTimeout(timer);const q=inp.value.trim();
+    if(q.length<3){if(ctl)ctl.abort();items=isStart?[locItem]:[];render();return;}
+    timer=setTimeout(async()=>{if(ctl)ctl.abort();ctl=new AbortController();
+      const c=(originPt&&!isStart)?originPt:(window._lastFix||(typeof map!=='undefined'?{lat:map.getCenter().lat,lon:map.getCenter().lng}:null));
+      const u='https://photon.komoot.io/api/?limit=6&q='+encodeURIComponent(q)+(c?`&lat=${c.lat.toFixed(3)}&lon=${c.lon.toFixed(3)}`:'');
+      try{const j=await (await fetch(u,{signal:ctl.signal})).json();if(inp.value.trim()!==q)return;
+        items=(j.features||[]).map(f=>{const l=photonLabel(f.properties);return {...l,full:[l.main,l.sub].filter(Boolean).join(', '),lon:f.geometry.coordinates[0],lat:f.geometry.coordinates[1]};});
+        if(isStart)items.unshift(locItem);sel=-1;render();}catch(e){if(e.name!=='AbortError'){items=isStart?[locItem]:[];render();}}},300);});
+  inp.addEventListener('focus',()=>{if(isStart&&!inp.value.trim()){items=[locItem];render();}});
+  inp.addEventListener('keydown',e=>{if(list.hidden)return;if(e.key==='ArrowDown'){sel=Math.min(items.length-1,sel+1);render();e.preventDefault();}
+    else if(e.key==='ArrowUp'){sel=Math.max(0,sel-1);render();e.preventDefault();}else if(e.key==='Enter'&&sel>=0){choose(items[sel]);e.preventDefault();}else if(e.key==='Escape')close();});
+  inp.addEventListener('blur',()=>setTimeout(close,150));}
+setupAC('origin',true);setupAC('dest',false);
 $('csv').onchange=async e=>{const f=e.target.files[0];if(!f)return;const m=parseCSV(await f.text());realVVI=m;
   $('dataBadge').textContent=`CSV loaded: ${Object.keys(m).length} rows override built-in Vizient data`;};
 loadVVI().then(async n=>{const x=await loadExtra();$('dataStatus').textContent=`✓ ${n.zip} ZIPs, ${n.tract} tracts; Mexico: ${x.mx} states of municipalities`;}).catch(e=>{$('dataStatus').textContent='⚠ failed to load VVI data: '+e.message;});
@@ -472,7 +498,7 @@ $('go').onclick=async()=>{
   try{$('go').disabled=true;st('');
     const o=originPt||await geocode($('origin').value.trim()||(()=>{throw new Error('Enter a start or tap Use my location')})());
     if(!$('dest').value.trim())throw new Error('Enter a destination');
-    const d=await geocode($('dest').value.trim());
+    const d=destPt||await geocode($('dest').value.trim());
     syncO();const res=await plan(o,d,mode,th(),log,OPTS);lastRes=res;lastO=o;lastD=d;
     layer.clearLayers();
     const T=th();
